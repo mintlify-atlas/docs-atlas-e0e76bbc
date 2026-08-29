@@ -1,0 +1,99 @@
+---
+title: "EDA Agent Changelog"
+sidebarTitle: "Changelog"
+description: "Release history for EDA Agent — new features, improvements, bug fixes, and breaking changes across all published versions."
+---
+
+This changelog documents every published version of EDA Agent. The project follows [Semantic Versioning](https://semver.org/) — version numbers communicate the nature of each release so that consumers can upgrade with confidence. All entries include the release date, a summary of changes, and — where applicable — migration guidance for breaking changes.
+
+<Note>
+  The complete release history, including tagged source snapshots and GitHub release notes, is available at [https://github.com/hodophile/eda-agent/releases](https://github.com/hodophile/eda-agent/releases).
+</Note>
+
+---
+
+## Versioning Policy
+
+EDA Agent uses **Semantic Versioning (`MAJOR.MINOR.PATCH`)** for all published releases:
+
+- **Patch releases** (`0.x.x → 0.x.(x+1)`) contain backwards-compatible **bug fixes** only. Upgrading a patch version is always safe.
+- **Minor releases** (`0.x.x → 0.(x+1).0`) add **new, backwards-compatible features**. Existing code continues to work without modification; opt-in to new capabilities at your own pace.
+- **Major releases** (`x.x.x → (x+1).0.0`) may introduce **breaking changes** to the public API. Every breaking change is documented in this changelog with a description of what changed and how to migrate.
+
+<Info>
+  While the project is in the `0.x` range, minor version bumps may also carry breaking changes per the semver specification. Breaking changes in `0.x` releases are clearly labelled **[Breaking]** in the entries below.
+</Info>
+
+---
+
+## v0.1.0 — Initial Release
+
+<Update label="v0.1.0">
+
+**Initial public release of EDA Agent.**
+
+This release establishes the foundational API for building software agents on top of an in-memory, event-driven architecture. All core primitives are stable and covered by TypeScript type declarations.
+
+### New Features
+
+- **`Agent` class** — The central abstraction for defining and running an agent. Exposes the full lifecycle API:
+  - `start()` — Initialises the agent, attaches the event bus, and invokes the `onStart` callback.
+  - `stop()` — Drains in-flight events, detaches subscribers, and invokes the `onStop` callback.
+  - `publish(type, payload)` — Validates agent state, enriches the event envelope, and delivers the event to the bus.
+  - `subscribe(type, handler)` — Registers a handler function for a named event type.
+  - `unsubscribe(type, handler)` — Removes a previously registered handler.
+
+- **In-memory `EventBus`** — A lightweight, dependency-free event bus with fan-out delivery. Events published to the bus are forwarded to every subscriber registered for that event type. The bus is intentionally in-memory: it has no external dependencies and adds zero infrastructure overhead for local development and testing.
+
+- **TypeScript generics for typed event payloads** — All publish and subscribe APIs accept a generic type parameter so that event payload shapes are enforced at compile time:
+
+  ```typescript
+  interface UserSignedUp {
+    userId: string;
+    email: string;
+  }
+
+  agent.subscribe<UserSignedUp>("user.signed_up", async (event) => {
+    // event.payload is typed as UserSignedUp
+    await sendWelcomeEmail(event.payload.email);
+  });
+  ```
+
+- **`AgentOptions`** — A configuration object accepted by the `Agent` constructor. Supported options in this release:
+
+  | Option | Type | Description |
+  |---|---|---|
+  | `name` | `string` | Human-readable identifier for the agent, used as the `source` field in event metadata. |
+  | `concurrency` | `number` | Maximum number of handler invocations that may run in parallel. Defaults to unbounded. |
+  | `timeout` | `number` | Maximum time (ms) a handler may run before it is considered failed. |
+  | `retries` | `number` | Number of times a failing handler is retried before `onError` is called. |
+  | `onStart` | `() => void \| Promise<void>` | Lifecycle hook invoked when the agent starts. |
+  | `onStop` | `() => void \| Promise<void>` | Lifecycle hook invoked when the agent stops. |
+  | `onError` | `(err: Error, event: Event) => void` | Global error handler for unrecoverable handler failures. |
+
+  ```typescript
+  const agent = new Agent({
+    name: "payment-agent",
+    concurrency: 10,
+    timeout: 5000,
+    retries: 2,
+    onStart: () => console.log("Agent started"),
+    onStop: () => console.log("Agent stopped"),
+    onError: (err, event) => logger.error({ err, event }, "Handler failed"),
+  });
+  ```
+
+- **`EventMetadata` envelope** — Every event delivered to a handler is wrapped in a metadata envelope that is auto-populated by `agent.publish()`:
+
+  | Field | Type | Description |
+  |---|---|---|
+  | `id` | `string` | Auto-generated unique identifier (UUID v4) for this event instance. |
+  | `timestamp` | `number` | Unix timestamp (ms) at the moment the event was published. |
+  | `source` | `string` | The `name` of the agent that published the event. |
+  | `type` | `string` | The event type string passed to `publish()`. |
+  | `payload` | `T` | The strongly-typed payload object. |
+
+- **MIT License** — EDA Agent is released under the [MIT License](https://github.com/hodophile/eda-agent/blob/main/LICENSE) by Waseem. The framework is free to use, modify, and distribute in both open-source and commercial projects.
+
+</Update>
+

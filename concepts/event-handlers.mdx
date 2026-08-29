@@ -1,0 +1,245 @@
+---
+title: "Event Handlers: Processing Events in EDA Agent"
+sidebarTitle: "Event Handlers"
+description: "Learn how event handlers work in EDA Agent — defining handler functions, typing payloads, composing handlers, and controlling execution flow."
+---
+
+Event handlers are the units of business logic in EDA Agent. Each handler is a function that declares its interest in one event type and performs a discrete, focused action whenever that event arrives — writing a record to a database, calling an external API, publishing a follow-up event, or updating local state. Because handlers are plain functions registered against an event type string, they are easy to test in isolation, trivial to add or remove, and naturally composable without any framework ceremony.
+
+## Handler Signature
+
+Every handler in EDA Agent conforms to the `EventHandler` type. The function receives a single argument — the fully-typed `Event<T>` object — and may return either `void` or a `Promise<void>` for async work. The bus handles both synchronous and asynchronous handlers transparently.
+
+```typescript
+type EventHandler<T = unknown> = (event: Event<T>) => Promise<void> | void;
+```
+
+The `Event<T>` type carries the three standard fields introduced in the [EDA Overview](/concepts/event-driven-architecture):
+
+```typescript
+interface Event<T = unknown> {
+  type: string;
+  payload: T;
+  metadata?: Record<string, unknown>;
+}
+```
+
+A minimal handler looks like this:
+
+```typescript
+const handleOrderPlaced: EventHandler = async (event) => {
+  console.log('New order received:', event.type);
+  console.log('Order data:', event.payload);
+};
+```
+
+## Registering Handlers
+
+Use `agent.subscribe(eventType, handler)` to register a handler. The method returns an `Unsubscribe` function you can call later to deregister that specific handler. You may call `subscribe()` before or after `agent.start()` — both are valid.
+
+```typescript
+import { Agent } from 'eda-agent';
+
+const agent = new Agent({ name: 'order-agent' });
+
+// Register before start — handler will be active once the agent starts.
+agent.subscribe('order.placed', async (event) => {
+  const { orderId, customerId, total } = event.payload as {
+    orderId: string;
+    customerId: string;
+    total: number;
+  };
+
+  await saveOrderToDatabase({ orderId, customerId, total });
+  console.log(`Order ${orderId} saved.`);
+});
+
+await agent.start();
+```
+
+<Note>
+  `agent.subscribe()` forwards directly to the internal event bus. The call is
+  synchronous — the handler is registered immediately and the returned
+  `Unsubscribe` function is live straight away, even before `agent.start()` is
+  called.
+</Note>
+
+## Typed Handlers
+
+Using TypeScript generics with `agent.subscribe<T>()` gives you full type safety for `event.payload` — no casts, no `any`, no runtime surprises. Declare a payload interface and pass it as the type parameter.
+
+```typescript
+interface UserCreatedPayload {
+  userId: string;
+  name: string;
+  email: string;
+}
+
+agent.subscribe<UserCreatedPayload>('user.created', async (event) => {
+  // event.payload is fully typed as UserCreatedPayload.
+  const { userId, name, email } = event.payload;
+
+  await sendWelcomeEmail({ to: email, name });
+  console.log(`Welcome email sent to ${name} (${userId}).`);
+});
+```
+
+You can co-locate payload interfaces with the handlers that use them, or centralise them in a shared `events.ts` file that all modules import. The latter approach makes it easy to enforce a consistent event contract across a codebase.
+
+```typescript
+// events.ts — shared event catalogue
+export interface OrderPlacedPayload {
+  orderId: string;
+  customerId: string;
+  lineItems: Array<{ sku: string; qty: number; unitPrice: number }>;
+  total: number;
+}
+
+export interface PaymentReceivedPayload {
+  orderId: string;
+  amount: number;
+  currency: string;
+  transactionId: string;
+}
+```
+
+```typescript
+// handlers/order.ts
+import type { OrderPlacedPayload } from '../events';
+
+agent.subscribe<OrderPlacedPayload>('order.placed', async (event) => {
+  // TypeScript knows event.payload.lineItems is an array — no assertion needed.
+  const itemCount = event.payload.lineItems.length;
+  console.log(`Processing order with ${itemCount} item(s).`);
+});
+```
+
+<Tip>
+  Define payload interfaces in a shared module and export them alongside event
+  type constants (e.g. `export const ORDER_PLACED = 'order.placed'`). This
+  ensures that producers and consumers always agree on both the type string and
+  the payload shape, eliminating a whole class of runtime bugs.
+</Tip>
+
+## Removing Handlers
+
+There are two ways to remove a handler from the bus. Both are equivalent — choose the one that fits your code structure.
+
+**Option 1 — Use the returned `Unsubscribe` function** (recommended for anonymous handlers):
+
+```typescript
+const unsubscribe = agent.subscribe('session.expired', async (event) => {
+  await clearSessionCache(event.payload.sessionId);
+});
+
+// Later — e.g. when a feature flag is toggled off.
+unsubscribe();
+```
+
+**Option 2 — Call `agent.unsubscribe()` with a named function reference**:
+
+```typescript
+async function onSessionExpired(event: Event<{ sessionId: string }>) {
+  await clearSessionCache(event.payload.sessionId);
+}
+
+agent.subscribe('session.expired', onSessionExpired);
+
+// Remove by reference.
+agent.unsubscribe('session.expired', onSessionExpired);
+```
+
+<Note>
+  Removing a handler only affects that specific function/event-type combination.
+  All other handlers registered for `session.expired` — or any other event type
+  — continue running undisturbed.
+</Note>
+
+## Multiple Handlers for One Event
+
+You can register as many handlers as you like for the same event type. This is the fan-out model that makes EDA Agent so composable — each concern gets its own handler, and they all execute concurrently when the event fires.
+
+```typescript
+// Handler 1 — fulfillment
+agent.subscribe('order.placed', async (event) => {
+  await reserveInventory(event.payload);
+});
+
+// Handler 2 — notifications
+agent.subscribe('order.placed', async (event) => {
+  await sendOrderConfirmationEmail(event.payload);
+});
+
+// Handler 3 — analytics
+agent.subscribe('order.placed', async (event) => {
+  await trackOrderMetric(event.payload);
+});
+
+// Publishing once triggers all three handlers concurrently.
+await agent.publish({
+  type: 'order.placed',
+  payload: { orderId: 'ord_789', customerId: 'cust_42', total: 149.99 },
+});
+```
+
+The bus invokes all three handlers in the same dispatch cycle. A slow analytics call in Handler 3 does not delay the inventory reservation in Handler 1.
+
+<Warning>
+  Concurrent fan-out means handlers for the same event may interleave with each
+  other at the `await` boundary. If two handlers write to the same row in a
+  database, you may need an optimistic lock or a serialisation mechanism — do not
+  assume that registered order implies exclusive sequential execution.
+</Warning>
+
+## Handler Best Practices
+
+Writing handlers that are easy to maintain, test, and operate requires a small amount of discipline. The following guidelines will serve you well as your agent grows.
+
+<CardGroup cols={2}>
+  <Card title="Keep Handlers Small" icon="scissors">
+    A handler should do one thing. If you find yourself writing a handler that
+    sends an email _and_ updates a database _and_ calls an external API, split it
+    into three handlers — or have the first handler publish an intermediate event
+    that triggers the rest.
+  </Card>
+  <Card title="Handle Errors Internally" icon="triangle-exclamation">
+    Wrap async operations in try/catch inside the handler. Unhandled rejections
+    are caught by the bus and re-emitted as `agent.error` events, but explicit
+    error handling gives you more control over retry logic and observability.
+  </Card>
+  <Card title="Avoid Non-Idempotent Side Effects" icon="rotate-left">
+    Prefer side effects that are safe to repeat — insert-or-update instead of
+    blind inserts, idempotent API calls with a deduplication key. This makes your
+    agent resilient to at-least-once delivery scenarios.
+  </Card>
+  <Card title="Don't Mutate the Event" icon="lock">
+    The `event` object passed to your handler is shared across all concurrent
+    handlers for the same publication. Mutating `event.payload` will corrupt the
+    data seen by sibling handlers. Treat it as read-only.
+  </Card>
+</CardGroup>
+
+```typescript
+// ✅ Good — focused, error-handled, idempotent.
+agent.subscribe<UserCreatedPayload>('user.created', async (event) => {
+  const { userId, email, name } = event.payload;
+
+  try {
+    await db.users.upsert({ where: { userId }, create: { userId, email, name } });
+  } catch (err) {
+    console.error(`Failed to persist user ${userId}:`, err);
+    // Optionally publish a compensating event for retry or dead-letter handling.
+    await agent.publish({
+      type: 'user.persistence.failed',
+      payload: { userId, reason: String(err) },
+    });
+  }
+});
+```
+
+<Tip>
+  For handlers that call external services, consider implementing a simple retry
+  wrapper or integrating a dedicated retry library. Publishing a
+  `*.failed` event on exhausted retries gives other parts of your agent a clean
+  hook to implement dead-letter handling, alerting, or manual intervention flows.
+</Tip>

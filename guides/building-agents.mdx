@@ -1,0 +1,262 @@
+---
+title: "Building Event-Driven Agents with EDA Agent"
+sidebarTitle: "Building Agents"
+description: "A complete guide to structuring, composing, and deploying EDA Agent instances — from single-agent setups to multi-agent event pipelines."
+---
+
+The architecture decisions you make when building agents — how many to create, how to divide responsibilities between them, and how they communicate — shape the scalability and maintainability of your entire system. EDA Agent is deliberately minimal: an agent is just a named event bus with configurable concurrency, timeouts, and retries. That simplicity means you can compose agents freely, keep each one focused on a single domain, and scale individual concerns without touching unrelated code.
+
+## Single Agent Setup
+
+The most common starting point is a single agent that handles several related event types. All handlers are registered before the agent starts, and the agent runs for the lifetime of the process.
+
+```typescript
+import { Agent } from 'eda-agent';
+
+const agent = new Agent({
+  name: 'store-agent',
+  concurrency: 15,
+  timeout: 10_000,
+  retries: 1,
+  onError: (error, event) => {
+    console.error(`[store-agent] Unhandled error in ${event.type}:`, error.message);
+  },
+});
+
+// Register handlers before starting
+agent.subscribe('user.registered', async (event) => {
+  const { userId, email } = event.payload as { userId: string; email: string };
+  await sendWelcomeEmail(email);
+  console.log(`Welcome email sent to ${userId}`);
+});
+
+agent.subscribe('order.placed', async (event) => {
+  const { orderId, items } = event.payload as { orderId: string; items: unknown[] };
+  await reserveInventory(orderId, items);
+  await notifyWarehouse(orderId);
+});
+
+agent.subscribe('order.cancelled', async (event) => {
+  const { orderId } = event.payload as { orderId: string };
+  await releaseInventory(orderId);
+  await issueRefund(orderId);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  await agent.stop();
+  process.exit(0);
+});
+
+await agent.start();
+console.log('Store agent is running');
+```
+
+## Structuring Your Agent Code
+
+As the number of event types grows, keeping all handlers in a single file becomes unwieldy. The following layout separates configuration, type definitions, and domain-specific handlers into distinct modules so that each concern is easy to find and test in isolation.
+
+```text
+src/
+  agent.ts            # Agent construction, configuration, and startup
+  events/
+    types.ts          # Shared event type constants and TypeScript interfaces
+    handlers/
+      user.ts         # Handlers for user.* events
+      order.ts        # Handlers for order.* events
+  index.ts            # Entry point — imports agent.ts and starts the agent
+```
+
+**`src/events/types.ts`** — centralise event type strings as constants to eliminate typos:
+
+```typescript
+export const EventTypes = {
+  USER_REGISTERED: 'user.registered',
+  USER_UPDATED:    'user.updated',
+  ORDER_PLACED:    'order.placed',
+  ORDER_SHIPPED:   'order.shipped',
+  ORDER_CANCELLED: 'order.cancelled',
+} as const;
+
+export interface UserRegisteredPayload {
+  userId: string;
+  email: string;
+  plan: 'free' | 'pro';
+}
+
+export interface OrderPlacedPayload {
+  orderId: string;
+  userId: string;
+  total: number;
+  items: Array<{ sku: string; qty: number }>;
+}
+```
+
+**`src/events/handlers/order.ts`** — export plain async functions that accept an `Event`:
+
+```typescript
+import { Event } from 'eda-agent';
+import { OrderPlacedPayload } from '../types';
+
+export async function handleOrderPlaced(event: Event<OrderPlacedPayload>) {
+  const { orderId, userId, total } = event.payload;
+  await reserveInventory(orderId, event.payload.items);
+  await chargeCustomer(userId, total);
+}
+
+export async function handleOrderCancelled(event: Event<{ orderId: string }>) {
+  await releaseInventory(event.payload.orderId);
+  await issueRefund(event.payload.orderId);
+}
+```
+
+**`src/agent.ts`** — wire everything together:
+
+```typescript
+import { Agent } from 'eda-agent';
+import { EventTypes } from './events/types';
+import { handleOrderPlaced, handleOrderCancelled } from './events/handlers/order';
+import { handleUserRegistered } from './events/handlers/user';
+
+export const agent = new Agent({
+  name: 'store-agent',
+  concurrency: 20,
+  timeout: 15_000,
+  retries: 2,
+});
+
+agent.subscribe(EventTypes.USER_REGISTERED, handleUserRegistered);
+agent.subscribe(EventTypes.ORDER_PLACED, handleOrderPlaced);
+agent.subscribe(EventTypes.ORDER_CANCELLED, handleOrderCancelled);
+```
+
+## Composing Multiple Agents
+
+Running several specialised agents in the same Node.js process lets you enforce domain boundaries and apply different concurrency or timeout policies to each domain without introducing network overhead. Each agent maintains its own internal event bus, so subscriptions on one agent never interfere with another.
+
+```typescript
+import { Agent } from 'eda-agent';
+
+// Handles all user lifecycle events — low concurrency, strict timeout
+const userAgent = new Agent({
+  name: 'user-agent',
+  concurrency: 5,
+  timeout: 8_000,
+  retries: 1,
+});
+
+// Handles all order events — higher concurrency, longer timeout for payment calls
+const orderAgent = new Agent({
+  name: 'order-agent',
+  concurrency: 30,
+  timeout: 20_000,
+  retries: 2,
+});
+
+// Register domain-specific handlers on each agent
+userAgent.subscribe('user.registered', handleUserRegistered);
+userAgent.subscribe('user.deleted',    handleUserDeleted);
+
+orderAgent.subscribe('order.placed',    handleOrderPlaced);
+orderAgent.subscribe('order.shipped',   handleOrderShipped);
+orderAgent.subscribe('order.cancelled', handleOrderCancelled);
+
+// Start all agents concurrently
+await Promise.all([userAgent.start(), orderAgent.start()]);
+console.log('All agents running');
+
+// Stop all agents gracefully on shutdown
+process.on('SIGTERM', async () => {
+  await Promise.all([userAgent.stop(), orderAgent.stop()]);
+  process.exit(0);
+});
+```
+
+## Agent Communication
+
+Because each `Agent` instance has its own internal event bus, a handler on one agent cannot directly trigger a subscription on another. There are two idiomatic patterns for cross-agent communication.
+
+**Pattern 1 — Direct publish:** A handler on `agentA` holds a reference to `agentB` and calls `agentB.publish()`. This is simple and explicit, and it keeps the type contract between the two agents visible in the code.
+
+```typescript
+import { userAgent } from './agents/user-agent';
+import { orderAgent } from './agents/order-agent';
+
+// When an order is placed, also notify the user agent
+orderAgent.subscribe('order.placed', async (event) => {
+  await processOrder(event.payload);
+
+  // Inform the user agent so it can send a confirmation email
+  await userAgent.publish({
+    type: 'user.order-confirmed',
+    payload: { userId: event.payload.userId, orderId: event.payload.orderId },
+  });
+});
+```
+
+**Pattern 2 — Shared EventBus:** For larger systems you can introduce a dedicated shared bus (a simple event emitter or a lightweight in-process broker) that all agents read from and write to. Each agent subscribes to the shared bus and re-publishes events onto its own internal bus. This decouples the agents completely and makes it easy to add new agents without modifying existing ones.
+
+## Deploying Agents
+
+EDA Agent processes are long-lived Node.js programs. The steps below cover the essentials of getting an agent process running reliably in production.
+
+<Steps>
+  <Step title="Build your TypeScript source">
+    Compile your project to JavaScript before deployment. Use `tsc` or a bundler such as `esbuild` for a single-file output.
+
+    ```bash
+    npx tsc --project tsconfig.json
+    # Output lands in dist/
+    ```
+  </Step>
+
+  <Step title="Run as a managed process with PM2">
+    A process manager restarts the agent automatically if it crashes and captures stdout/stderr logs.
+
+    ```bash
+    npm install -g pm2
+    pm2 start dist/index.js --name store-agent --time
+    pm2 save          # persist across reboots
+    pm2 startup       # install system service
+    ```
+  </Step>
+
+  <Step title="Containerise with Docker">
+    For container-based deployments, keep the image small and set `NODE_ENV=production`.
+
+    ```dockerfile
+    FROM node:20-alpine
+    WORKDIR /app
+    COPY package*.json ./
+    RUN npm ci --omit=dev
+    COPY dist/ ./dist/
+    ENV NODE_ENV=production
+    CMD ["node", "dist/index.js"]
+    ```
+
+    Build and run:
+
+    ```bash
+    docker build -t store-agent:latest .
+    docker run --restart=unless-stopped --name store-agent store-agent:latest
+    ```
+  </Step>
+
+  <Step title="Handle SIGTERM for graceful shutdown">
+    Container orchestrators (Kubernetes, ECS) send `SIGTERM` before forcibly killing a container. Always listen for it and call `agent.stop()` so in-flight handlers can complete.
+
+    ```typescript
+    // src/index.ts
+    import { agent } from './agent';
+
+    await agent.start();
+    console.log(`[${agent.name}] running`);
+
+    process.on('SIGTERM', async () => {
+      console.log(`[${agent.name}] SIGTERM received — shutting down`);
+      await agent.stop();
+      process.exit(0);
+    });
+    ```
+  </Step>
+</Steps>

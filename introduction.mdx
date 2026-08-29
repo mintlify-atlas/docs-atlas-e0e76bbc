@@ -1,0 +1,67 @@
+---
+title: "EDA Agent: Event-Driven Agent Orchestration"
+sidebarTitle: "Introduction"
+description: "EDA Agent is a framework for building autonomous software agents on an event-driven architecture. Learn its design philosophy, core primitives, and when to use it."
+---
+
+EDA Agent is a lightweight framework for building autonomous software agents that communicate through events rather than direct function calls. Instead of tightly coupling components with synchronous request/response chains, EDA Agent gives each agent a dedicated event bus — a message backbone that decouples producers from consumers, lets handlers react asynchronously, and makes complex multi-agent systems straightforward to reason about and extend.
+
+## Why Event-Driven Agents?
+
+Traditional request/response agents are simple to start with, but they accumulate hidden costs as complexity grows: callers must know about callees, failures propagate synchronously, and adding new behaviour means editing existing code. EDA Agent takes a different approach by treating every significant occurrence in your system as a first-class **event**.
+
+**Loose coupling** — Publishers emit events without knowing which handlers (if any) will react. Handlers subscribe to event types without knowing which component produced them. You can add, remove, or swap handlers without touching publisher code.
+
+**Scalability** — Because handlers process events asynchronously, slow consumers never block fast producers. Workloads can be distributed across worker pools, and the event bus can be backed by an external message broker when you need to scale beyond a single process.
+
+**Resilience** — Failures are contained. A handler that throws an error doesn't crash the publisher or prevent other handlers from running. Retry logic, dead-letter queues, and circuit breakers can be applied at the bus level without modifying business logic.
+
+**Composability** — Agents become building blocks. A single published event can fan out to a logging handler, a notification handler, and an analytics handler simultaneously. Pipelines are assembled by wiring handlers together rather than by rewriting core logic.
+
+<Tip>
+  Event-driven design is especially powerful when your agent needs to integrate with external systems — webhooks, message queues, IoT sensors, or third-party APIs — because each integration becomes an isolated handler rather than an entangled dependency.
+</Tip>
+
+## Core Primitives
+
+EDA Agent exposes four primitives that map directly onto the event-driven pattern:
+
+**Agent** — The top-level orchestration object. An `Agent` owns an event bus, manages handler registration, controls the lifecycle (`start` / `stop`), and is the single entry point your application code interacts with. You instantiate one agent per logical unit of work or service boundary.
+
+**EventBus** — The internal message backbone that routes published events to matching subscribers. The bus maintains a registry of `eventType → handler[]` mappings, dispatches events asynchronously, and provides hooks for middleware such as logging, tracing, and error handling. You rarely interact with the `EventBus` directly — the `Agent` API delegates to it — but understanding it helps when configuring advanced routing or plugging in external brokers.
+
+**EventHandler** — A function (synchronous or `async`) that receives an `Event` and performs a unit of work in response. Handlers are registered against one or more event type strings. A single event type can have many handlers (fan-out), and a single handler can subscribe to multiple event types (aggregation).
+
+**Event** — A plain, serialisable object that describes something that has happened. Every event carries a `type` string that identifies the occurrence, a `payload` containing the domain-specific data, and optional metadata fields such as `id`, `timestamp`, and `source`. Events are immutable by convention — handlers read them but never mutate them.
+
+<Note>
+  Keeping events small and focused on a single occurrence makes them easier to version, replay, and audit. Resist the temptation to pack multiple concerns into one event type.
+</Note>
+
+## When to Use EDA Agent
+
+EDA Agent is a good fit whenever your software needs to react to things that happen rather than answer questions that are asked:
+
+- **Workflow orchestration** — break multi-step business processes into discrete events (`order.placed` → `payment.processed` → `fulfilment.started`) so each step is independently testable and retryable.
+- **Asynchronous data pipelines** — ingest, transform, and route streams of records without blocking the ingestion path.
+- **Sensor and IoT data ingestion** — handle bursty, high-frequency input from devices or external feeds without coupling producers to consumers.
+- **Multi-agent systems** — let specialised agents collaborate by publishing events that peer agents subscribe to, keeping each agent's internal logic private.
+- **Webhook and integration hubs** — translate inbound webhook payloads into typed internal events and fan them out to the right handlers.
+- **Background job coordination** — replace ad-hoc cron jobs and task queues with a unified event model where jobs are triggered by meaningful domain events.
+
+## How It Fits Together
+
+At runtime the flow is straightforward. Your application creates an `Agent`, registers `EventHandler` functions against named event types, then calls `agent.start()`. Internally, `start()` initialises the `EventBus` and any configured middleware, then signals that the agent is ready to process events.
+
+When `agent.publish(event)` is called — from your own code, a webhook listener, a polling loop, or another handler — the `EventBus` looks up every handler subscribed to `event.type` and invokes each one with the full `Event` object. Handlers run concurrently and independently; a failure in one does not affect the others. Once all handlers for a given event have settled, the bus is free to process the next event in the queue.
+
+This cycle — publish, route, handle, repeat — is the heartbeat of every EDA Agent application. Because each step is decoupled, you can observe, test, and evolve any part of the system without disturbing the others.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="bolt" href="/quickstart">
+    Build and run your first event-driven agent in under five minutes.
+  </Card>
+  <Card title="Core Concepts" icon="book-open" href="/concepts">
+    Explore the conceptual model behind events, the bus, handlers, and the agent lifecycle.
+  </Card>
+</CardGroup>

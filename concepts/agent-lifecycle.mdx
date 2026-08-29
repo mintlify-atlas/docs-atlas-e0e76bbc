@@ -1,0 +1,207 @@
+---
+title: "Agent Lifecycle: Initialization to Shutdown"
+sidebarTitle: "Agent Lifecycle"
+description: "Learn how EDA Agent manages its lifecycle — from initialization and startup through active event processing to graceful shutdown and cleanup."
+---
+
+Every long-running process needs well-defined boundaries around when it is ready to accept work, when it is actively processing, and when it has cleanly released its resources. EDA Agent models these boundaries as explicit lifecycle phases, making it straightforward to wire in setup logic (opening database connections, registering handlers) and teardown logic (draining in-flight events, closing sockets) in exactly the right order — without race conditions or silent resource leaks.
+
+## Lifecycle Phases
+
+An EDA Agent instance moves through four distinct phases during its existence. Transitions are always forward — an agent that has been stopped cannot be restarted; create a new instance instead.
+
+<Steps>
+  <Step title="Created">
+    The agent object has been instantiated with `new Agent(config)` but `start()`
+    has not yet been called. The internal event bus exists in memory but is not
+    yet active. Any handlers you register at this stage are queued and will be
+    activated when the agent starts.
+
+    ```typescript
+    const agent = new Agent({ name: 'my-agent' });
+    console.log(agent.state); // 'created'
+    ```
+  </Step>
+
+  <Step title="Starting">
+    `agent.start()` has been called. EDA Agent is performing its internal
+    bootstrap sequence: initialising the event bus, executing the `onStart`
+    lifecycle hook, and activating all pre-registered handlers. The agent is not
+    yet processing external events during this phase.
+
+    ```typescript
+    const startPromise = agent.start();
+    // agent.state is 'starting' here (synchronously after calling start())
+    await startPromise;
+    ```
+  </Step>
+
+  <Step title="Running">
+    The bootstrap sequence completed successfully. The event bus is active and
+    accepting publications. All registered handlers are live. This is the normal
+    operating state where your agent does its work.
+
+    ```typescript
+    await agent.start();
+    console.log(agent.state); // 'running'
+    ```
+  </Step>
+
+  <Step title="Stopped">
+    `agent.stop()` has been called and the shutdown sequence has completed. All
+    in-flight event processing has been drained, the `onStop` lifecycle hook has
+    run, and the event bus has been cleared. The agent will not accept new
+    publications in this state.
+
+    ```typescript
+    await agent.stop();
+    console.log(agent.state); // 'stopped'
+    ```
+  </Step>
+</Steps>
+
+## Starting the Agent
+
+Call `agent.start()` to move the agent from `created` to `running`. The method returns a `Promise` that resolves once the agent is fully operational. You should always `await` it before publishing events or assuming handlers are active.
+
+```typescript
+import { Agent } from 'eda-agent';
+
+const agent = new Agent({
+  name: 'my-agent',
+  onStart: async () => {
+    // Runs during the 'starting' phase — ideal for opening DB connections,
+    // loading configuration, or registering dynamic handlers.
+    console.log('Agent is starting up…');
+  },
+});
+
+// Register handlers before or after start() — both are valid.
+agent.subscribe('order.placed', async (event) => {
+  console.log('Processing order', event.payload);
+});
+
+// Transition: Created → Starting → Running
+await agent.start();
+
+console.log(agent.state); // 'running'
+
+// Safe to publish events now.
+await agent.publish({ type: 'order.placed', payload: { orderId: 'abc-123' } });
+```
+
+<Tip>
+  You can register handlers both before and after calling `start()`. Handlers
+  registered while the agent is `running` become active immediately with no
+  restart required.
+</Tip>
+
+## Graceful Shutdown
+
+Call `agent.stop()` to begin the shutdown sequence. The agent transitions to `stopped` after draining all in-flight event handlers, giving each one the chance to finish its work cleanly.
+
+```typescript
+// Somewhere in your shutdown logic (SIGTERM handler, test teardown, etc.)
+process.on('SIGTERM', async () => {
+  console.log('Received SIGTERM — shutting down gracefully…');
+
+  // Transition: Running → Stopped
+  // Waits for all currently-executing handlers to finish before resolving.
+  await agent.stop();
+
+  console.log('Agent stopped. Exiting.');
+  process.exit(0);
+});
+```
+
+Internally, `stop()` performs these steps in order:
+
+1. Sets the state to `stopped` so no new publications are accepted.
+2. Waits for all handler `Promise`s that are currently in flight to settle.
+3. Executes the `onStop` lifecycle hook.
+4. Calls `bus.clear()` to remove all subscriptions and release references.
+
+<Warning>
+  Do not call `agent.publish()` after calling `agent.stop()`. Any events
+  published to a stopped agent are silently discarded — handlers will not run.
+  If your application needs to restart event processing, create a new `Agent`
+  instance rather than reusing a stopped one.
+</Warning>
+
+## Lifecycle Hooks
+
+EDA Agent exposes two optional async hooks in the constructor config that let you integrate your own setup and teardown logic into the managed lifecycle.
+
+```typescript
+const agent = new Agent({
+  name: 'my-agent',
+
+  /**
+   * Called during the 'starting' phase, before the agent transitions to
+   * 'running'. Use this hook to open connections, load secrets, seed state,
+   * or register handlers that depend on runtime configuration.
+   */
+  onStart: async () => {
+    db = await Database.connect(process.env.DB_URL);
+    cache = new RedisCache(process.env.REDIS_URL);
+    console.log('Resources initialised.');
+  },
+
+  /**
+   * Called during shutdown, after in-flight handlers have been drained but
+   * before the bus is cleared. Use this hook to flush buffers, close
+   * connections, and release external resources.
+   */
+  onStop: async () => {
+    await db.close();
+    await cache.disconnect();
+    console.log('Resources released.');
+  },
+});
+```
+
+<Note>
+  Lifecycle hooks are `async` — EDA Agent awaits them before proceeding to the
+  next phase. If `onStart` rejects, the agent transitions to an error state and
+  the `start()` promise rejects with the same error. If `onStop` rejects, the
+  error is surfaced through the `stop()` promise but the bus is still cleared.
+</Note>
+
+### When to Use Each Hook
+
+| Hook | Use For |
+|---|---|
+| `onStart` | Opening DB connections, loading config/secrets, warming caches |
+| `onStop` | Closing connections, flushing write buffers, deregistering from service mesh |
+
+## Error Handling During Lifecycle
+
+**Start failures** — If `onStart` throws or rejects, `agent.start()` rejects with that error and the agent remains in a non-running state. The bus is not activated and no handlers will fire. Wrap your `start()` call in a try/catch and handle startup errors explicitly.
+
+```typescript
+try {
+  await agent.start();
+} catch (err) {
+  console.error('Agent failed to start:', err);
+  // Safe to inspect agent.state here — it will NOT be 'running'.
+  process.exit(1);
+}
+```
+
+**Stop interruptions** — If `onStop` throws or rejects, the error propagates through `agent.stop()`, but EDA Agent still clears the bus and marks the agent as `stopped`. You will not end up with a partially-stopped agent holding live subscriptions.
+
+```typescript
+try {
+  await agent.stop();
+} catch (err) {
+  // onStop failed, but the agent IS stopped and the bus IS cleared.
+  console.error('Error during shutdown hook:', err);
+}
+```
+
+<Warning>
+  Never swallow errors thrown from lifecycle hooks without logging them. Silent
+  failures in `onStart` can leave external resources (database connections,
+  message queue subscriptions) in an indeterminate state that is difficult to
+  debug later.
+</Warning>

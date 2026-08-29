@@ -1,0 +1,177 @@
+---
+title: "Event Bus: The Core Message Router"
+sidebarTitle: "Event Bus"
+description: "Explore EDA Agent's event bus — the central broker that routes events from producers to subscribers, manages subscriptions, and ensures delivery ordering."
+---
+
+The event bus is the nervous system of every EDA Agent instance. It is the single point through which all events flow — accepting publications from producers, maintaining the registry of active subscriptions, and fanning each event out to every handler that has expressed interest in its type. Because all inter-component communication passes through the bus, the rest of your agent code remains blissfully unaware of who else is listening, making the system easy to extend and safe to refactor.
+
+## How the Bus Works
+
+When a producer calls `bus.publish(event)`, the bus performs a registry lookup for `event.type` and collects all handlers currently subscribed to that type. It then invokes every matching handler concurrently, wrapping each invocation so that a rejection from one handler does not cancel the others.
+
+This **fan-out** behaviour is what makes it straightforward to add cross-cutting concerns — logging, metrics, auditing — without touching existing business-logic handlers. Simply register an additional subscriber for the event type and it will be called alongside all existing ones.
+
+```typescript
+import { EventBus } from 'eda-agent';
+
+const bus = new EventBus();
+
+// Two independent handlers for the same event type.
+bus.subscribe('payment.received', async (event) => {
+  await creditUserAccount(event.payload);
+});
+
+bus.subscribe('payment.received', async (event) => {
+  await emitAnalyticsMetric('payment_received', event.payload.amount);
+});
+
+// Both handlers run concurrently when this event is published.
+await bus.publish({
+  type: 'payment.received',
+  payload: { userId: 'u_42', amount: 99.00, currency: 'USD' },
+});
+```
+
+<Info>
+  When you use `agent.publish()` and `agent.subscribe()` on the top-level
+  `Agent` instance, those calls are forwarded directly to the agent's internal
+  bus. The `Agent` API is simply a convenience wrapper — both surfaces share the
+  same underlying registry.
+</Info>
+
+## The EventBus API
+
+### `bus.publish(event)`
+
+Publishes an event to all registered subscribers. Returns a `Promise` that resolves once every handler has been invoked (though not necessarily once every handler has _completed_ — see [Event Ordering](#event-ordering) below).
+
+```typescript
+bus.publish(event: Event): Promise<void>
+```
+
+<ParamField body="event.type" type="string" required>
+  A dot-namespaced string that identifies the category of event. Used as the
+  lookup key to find matching subscribers. Convention: past-tense facts such as
+  `user.created`, `task.completed`, or `tool.execution.failed`.
+</ParamField>
+
+<ParamField body="event.payload" type="object" required>
+  The domain-specific data associated with this event. The shape is
+  event-type-specific and should be documented by the team that owns each event
+  type. Treat the payload as immutable — handlers must not mutate it.
+</ParamField>
+
+<ParamField body="event.metadata" type="object">
+  Optional envelope for cross-cutting concerns that are not part of the domain
+  payload. Common fields include `correlationId`, `causationId`, `timestamp`,
+  and `traceId`. Metadata is passed through to handlers unchanged.
+</ParamField>
+
+### `bus.subscribe(eventType, handler)`
+
+Registers a handler function to be called whenever an event with the given `eventType` is published. Returns an `Unsubscribe` function — call it to remove this specific handler without affecting other handlers registered for the same type.
+
+```typescript
+bus.subscribe(eventType: string, handler: EventHandler): Unsubscribe
+```
+
+```typescript
+// Register a handler and capture the unsubscribe function.
+const unsubscribe = bus.subscribe('session.expired', async (event) => {
+  await invalidateUserTokens(event.payload.sessionId);
+});
+
+// Later — remove only this handler from the 'session.expired' subscriptions.
+unsubscribe();
+```
+
+### `bus.unsubscribe(eventType, handler)`
+
+Removes a previously registered handler by reference. Equivalent to calling the `Unsubscribe` function returned by `subscribe()`, but requires you to hold a reference to the original handler function.
+
+```typescript
+bus.unsubscribe(eventType: string, handler: EventHandler): void
+```
+
+```typescript
+async function onUserDeleted(event: Event) {
+  await removeUserData(event.payload.userId);
+}
+
+bus.subscribe('user.deleted', onUserDeleted);
+
+// Remove by reference — useful when the handler is a named function.
+bus.unsubscribe('user.deleted', onUserDeleted);
+```
+
+<Note>
+  When using anonymous arrow functions as handlers, you cannot later call
+  `bus.unsubscribe()` by reference because there is no stable reference to pass.
+  In those cases, prefer to capture and call the `Unsubscribe` function returned
+  by `bus.subscribe()`.
+</Note>
+
+### `bus.clear()`
+
+Removes all subscriptions for all event types and resets the internal registry. After calling `clear()`, no handlers will be invoked for any subsequent publications until new subscriptions are registered.
+
+```typescript
+bus.clear(): void
+```
+
+```typescript
+// Tear down everything — typically called internally by agent.stop().
+bus.clear();
+```
+
+<Warning>
+  `bus.clear()` is a destructive operation. It removes **every** subscription
+  across **every** event type in a single call. It is called automatically by
+  `agent.stop()` as part of graceful shutdown. Avoid calling it manually during
+  normal operation — use targeted `unsubscribe()` calls instead.
+</Warning>
+
+## Event Ordering
+
+**Within a single event type**, handlers are invoked in the order they were registered. If Handler A was subscribed before Handler B for `task.done`, Handler A will always be called before Handler B for any given `task.done` event.
+
+**Across event types**, no ordering guarantees are made. If publishing event X causes a handler to publish event Y, event Y's handlers will begin executing asynchronously. Whether they complete before or after other pending handlers depends on the JavaScript event loop.
+
+```typescript
+bus.subscribe('order.placed', async (event) => {
+  // This handler publishes a follow-up event.
+  await bus.publish({ type: 'inventory.reserve', payload: event.payload });
+  // 'inventory.reserve' handlers begin running, but this handler
+  // continues independently — there is no implicit await between them.
+  await recordOrder(event.payload);
+});
+```
+
+<Tip>
+  If your workflow requires a strict sequence — e.g. "inventory must be reserved
+  before the order confirmation email is sent" — model that dependency explicitly
+  by having the `inventory.reserved` handler publish the `email.send` event,
+  rather than relying on timing assumptions across independent handlers.
+</Tip>
+
+## Direct Bus Access vs Agent API
+
+EDA Agent exposes event bus functionality through both the top-level `Agent` instance and the `agent.bus` property. For everyday use, prefer the `Agent` API — it participates in lifecycle management (e.g. `agent.subscribe()` calls made before `start()` are activated at the right time). Use `agent.bus` directly only when you need lower-level control.
+
+```typescript
+// ✅ Preferred — goes through lifecycle-aware Agent wrapper.
+agent.subscribe('user.created', handler);
+await agent.publish({ type: 'user.created', payload: { ... } });
+
+// ⚠️  Direct bus access — bypasses lifecycle checks.
+// Useful for testing or advanced introspection.
+agent.bus.subscribe('user.created', handler);
+await agent.bus.publish({ type: 'user.created', payload: { ... } });
+```
+
+| | `agent.publish()` | `agent.bus.publish()` |
+|---|---|---|
+| Lifecycle-aware | ✅ Yes — no-ops when stopped | ⚠️ No — always routes to bus |
+| Typing | Same | Same |
+| Recommended for production | ✅ | Only for tests / tooling |

@@ -1,0 +1,137 @@
+---
+title: "Configuring EDA Agent for Your Use Case"
+sidebarTitle: "Configuration"
+description: "Configure EDA Agent's concurrency, timeouts, retry behaviour, and lifecycle hooks to match your workload's requirements."
+---
+
+EDA Agent exposes a straightforward set of constructor options that let you tailor every instance to the demands of your workload. Whether you are building a lightweight prototype that only needs a name, or a high-throughput production pipeline with precise concurrency limits, aggressive timeouts, and automatic retries, all of those knobs are available in a single configuration object that you pass to `new Agent()`.
+
+## Agent Options
+
+Every configuration property lives on the options object accepted by the `Agent` constructor. Required fields must be supplied at construction time; optional fields fall back to sensible defaults when omitted.
+
+<ParamField path="name" type="string" required>
+  A human-readable identifier for the agent. This value appears in log output, error messages, and the `agent.name` property at runtime, making it easy to trace activity back to a specific agent when multiple instances are running in the same process.
+</ParamField>
+
+<ParamField path="concurrency" type="number" default={10}>
+  The maximum number of handler executions that may run simultaneously. When the limit is reached, additional incoming events are queued and dispatched as running handlers complete. Lower this value to protect downstream services from being overwhelmed; raise it when handlers are mostly I/O-bound and you want maximum throughput.
+</ParamField>
+
+<ParamField path="timeout" type="number" default={30000}>
+  Per-handler execution timeout in milliseconds. If a handler has not resolved or rejected within this window it is forcibly cancelled, and the cancellation is treated as an error — surfaced via `onError` and subject to the `retries` policy. Set this to a value that reflects the realistic worst-case latency of your slowest dependency.
+</ParamField>
+
+<ParamField path="retries" type="number" default={0}>
+  The number of times a failing handler is retried before the error is finally surfaced. A value of `0` means the handler is attempted exactly once; a value of `3` means up to four total attempts. Retries are particularly useful when handlers call external services that may experience transient failures.
+</ParamField>
+
+<ParamField path="onStart" type="() => Promise<void> | void">
+  An optional async lifecycle callback invoked after `agent.start()` completes successfully and the agent enters the `'running'` state. Use this hook to perform any warm-up work — opening database connections, loading caches, or emitting a startup telemetry event — before the first event is dispatched to a handler.
+</ParamField>
+
+<ParamField path="onStop" type="() => Promise<void> | void">
+  An optional async lifecycle callback invoked just before `agent.stop()` finishes and the agent transitions to `'stopped'`. Use it to drain queues, flush buffers, or close connections gracefully. The agent waits for this callback to resolve before it completes the stop sequence.
+</ParamField>
+
+<ParamField path="onError" type="(error: Error, event: Event) => void">
+  A global error handler called whenever a handler throws an unhandled exception (including timeout cancellations) and all retry attempts have been exhausted. The callback receives both the `Error` object and the original `Event` that triggered the failing handler. If this callback is not provided, errors are silently discarded — always supply one in production.
+</ParamField>
+
+## Example Configurations
+
+The three examples below cover the most common deployment scenarios.
+
+<Tabs>
+  <Tab title="Minimal">
+    The smallest valid configuration — only the required `name` field. All other options use their defaults: concurrency of 10, a 30-second timeout, no retries, and no lifecycle hooks.
+
+    ```typescript
+    import { Agent } from 'eda-agent';
+
+    const agent = new Agent({
+      name: 'my-agent',
+    });
+
+    await agent.start();
+    ```
+  </Tab>
+
+  <Tab title="Production">
+    A balanced configuration suitable for most production workloads. Concurrency is capped at 20 to avoid overwhelming downstream services, handlers time out after 15 seconds, failed handlers are retried twice, and all three lifecycle hooks are wired up for observability.
+
+    ```typescript
+    import { Agent } from 'eda-agent';
+    import { logger } from './logger';
+    import { metrics } from './metrics';
+
+    const agent = new Agent({
+      name: 'order-processor',
+      concurrency: 20,
+      timeout: 15_000,
+      retries: 2,
+
+      onStart: async () => {
+        logger.info('order-processor started');
+        await metrics.increment('agent.start');
+      },
+
+      onStop: async () => {
+        logger.info('order-processor stopping — draining handlers');
+        await metrics.flush();
+      },
+
+      onError: (error, event) => {
+        logger.error(
+          { err: error, eventType: event.type },
+          'Handler failed after all retries'
+        );
+        metrics.increment('agent.handler.error');
+      },
+    });
+
+    await agent.start();
+    ```
+  </Tab>
+
+  <Tab title="High-Throughput">
+    For agents that need to fan out across many lightweight, fast-completing handlers — such as fan-out notification pipelines. Concurrency is raised significantly, the timeout is reduced to surface slow handlers quickly, and retries are set higher to tolerate transient spikes.
+
+    ```typescript
+    import { Agent } from 'eda-agent';
+
+    const agent = new Agent({
+      name: 'notification-fanout',
+      concurrency: 200,
+      timeout: 5_000,
+      retries: 4,
+
+      onError: (error, event) => {
+        // Route permanently failed notifications to a dead-letter store
+        console.error(
+          `[notification-fanout] Permanent failure for ${event.type}:`,
+          error.message
+        );
+      },
+    });
+
+    await agent.start();
+    ```
+  </Tab>
+</Tabs>
+
+## Runtime Configuration
+
+All configuration options are evaluated at construction time and compiled into the internal agent state. This design keeps the runtime behaviour predictable: once an agent is running you always know exactly what concurrency limit, timeout value, and retry count apply to every handler execution.
+
+<Warning>
+  Configuration cannot be changed on a running agent. Properties such as `concurrency`, `timeout`, and `retries` are **read-only after construction**. If you need to adjust these values you must call `agent.stop()`, create a new `Agent` instance with the updated options, and call `start()` on the new instance. Re-subscribe your handlers before starting the replacement agent to avoid dropping events.
+</Warning>
+
+The `agent.state` property reflects the current lifecycle phase — `'created'`, `'starting'`, `'running'`, or `'stopped'` — and is the only property that changes after construction. You can read it at any time to gate operations that should only run while the agent is active:
+
+```typescript
+if (agent.state === 'running') {
+  await agent.publish({ type: 'health.check', payload: {} });
+}
+```

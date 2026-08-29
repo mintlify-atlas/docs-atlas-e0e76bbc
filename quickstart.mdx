@@ -1,47 +1,185 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with EDA Agent in Minutes"
+sidebarTitle: "Quickstart"
+description: "Learn how to install EDA Agent, define your first event, register a handler, and run a working agent in under five minutes."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+In this guide you will build a minimal but fully functional event-driven agent that listens for a `user.created` event and logs a personalised welcome message. By the end you will have installed EDA Agent, written a typed event contract, wired up a handler, and seen the agent respond to a published event — all in fewer than thirty lines of code.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+<Note>
+  TypeScript is strongly recommended for EDA Agent projects. Typed event contracts catch mismatches between publishers and handlers at compile time, long before they can cause runtime surprises in production.
+</Note>
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+
+  <Step title="Install EDA Agent">
+    Add EDA Agent to your project using your preferred package manager.
+
+    <CodeGroup>
+      ```bash npm
+      npm install eda-agent
+      ```
+
+      ```bash yarn
+      yarn add eda-agent
+      ```
+
+      ```bash pnpm
+      pnpm add eda-agent
+      ```
+    </CodeGroup>
+
+    EDA Agent has no required peer dependencies. If you are using TypeScript, type declarations are bundled with the package — no separate `@types` install is needed.
+  </Step>
+
+  <Step title="Create an Agent Instance">
+    Import `Agent` from `eda-agent` and instantiate it with a descriptive name. The name is used in log output and tracing, so choose something that identifies the service boundary this agent owns.
+
+    ```typescript agent.ts
+    import { Agent } from 'eda-agent';
+
+    const agent = new Agent({ name: 'user-service-agent' });
+    ```
+
+    A single `Agent` instance manages its own internal `EventBus`, handler registry, and lifecycle state. In most applications you will create one agent per service or bounded context.
+  </Step>
+
+  <Step title="Define an Event Type">
+    Model the `user.created` event as a TypeScript interface. This contract is shared between the code that publishes the event and the code that handles it, making both sides easy to understand and safe to refactor.
+
+    ```typescript events.ts
+    export interface UserCreatedPayload {
+      name: string;
+      email: string;
+    }
+
+    export interface UserCreatedEvent {
+      type: 'user.created';
+      payload: UserCreatedPayload;
+    }
+    ```
+
+    <Tip>
+      Keeping event type definitions in a dedicated `events.ts` (or `events/` directory) makes them easy to share across handlers, publishers, and tests without creating circular imports.
+    </Tip>
+  </Step>
+
+  <Step title="Register an Event Handler">
+    Use `agent.subscribe()` to register a handler function for the `user.created` event type. The handler receives the full event object and can be synchronous or `async`.
+
+    ```typescript agent.ts
+    import { Agent } from 'eda-agent';
+
+    const agent = new Agent({ name: 'user-service-agent' });
+
+    agent.subscribe('user.created', async (event) => {
+      console.log(`Welcome, ${event.payload.name}!`);
+      console.log(`A confirmation has been sent to ${event.payload.email}.`);
+    });
+    ```
+
+    You can register multiple handlers for the same event type — the bus will invoke all of them concurrently when the event is published.
+  </Step>
+
+  <Step title="Publish an Event">
+    Call `agent.publish()` with an object whose `type` matches one of your registered subscriptions. The `payload` carries the domain-specific data your handlers need.
+
+    ```typescript agent.ts
+    agent.publish({
+      type: 'user.created',
+      payload: {
+        name: 'Alice',
+        email: 'alice@example.com',
+      },
+    });
+    ```
+
+    Publishing is non-blocking. The event is queued on the internal bus and dispatched to handlers asynchronously, so your publisher continues executing immediately after the call returns.
+  </Step>
+
+  <Step title="Start the Agent">
+    Call `agent.start()` to initialise the event bus and begin processing queued events. In a long-running service you will typically also register signal handlers for graceful shutdown.
+
+    ```typescript agent.ts
+    // Start the agent
+    await agent.start();
+
+    // Graceful shutdown on SIGINT / SIGTERM
+    process.on('SIGINT', async () => {
+      await agent.stop();
+      process.exit(0);
+    });
+    ```
+
+    `agent.stop()` drains any in-flight events before closing the bus, ensuring no work is silently abandoned when the process shuts down.
+  </Step>
+
+  <Step title="Run and Verify">
+    Compile (if using TypeScript) and run your agent:
 
     ```bash
-    npm install your-package
+    npx ts-node agent.ts
     ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
 
-    ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+    You should see the following output in your terminal:
 
-    ```bash
-    your-cli start
+    ```text
+    Welcome, Alice!
+    A confirmation has been sent to alice@example.com.
     ```
+
+    <Warning>
+      If no output appears, verify that `agent.start()` is called **after** your `subscribe()` and `publish()` calls, and that you are `await`-ing the `start()` promise before the process exits.
+    </Warning>
   </Step>
+
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## Complete Example
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
+Here is the full working example in a single TypeScript file, combining every step above.
+
+```typescript agent.ts
+import { Agent, EventBus } from 'eda-agent';
+
+// --- Event type definitions ---
+interface UserCreatedPayload {
+  name: string;
+  email: string;
+}
+
+// --- Create the agent ---
+const agent = new Agent({ name: 'user-service-agent' });
+
+// --- Register a handler for 'user.created' events ---
+agent.subscribe('user.created', async (event) => {
+  console.log(`Welcome, ${event.payload.name}!`);
+  console.log(`A confirmation has been sent to ${event.payload.email}.`);
+});
+
+// --- Publish a 'user.created' event ---
+agent.publish({
+  type: 'user.created',
+  payload: {
+    name: 'Alice',
+    email: 'alice@example.com',
+  },
+});
+
+// --- Start the agent and set up graceful shutdown ---
+await agent.start();
+
+process.on('SIGINT', async () => {
+  await agent.stop();
+  process.exit(0);
+});
+```
+
+<CardGroup cols={2}>
+  <Card title="Building Agents" icon="hammer" href="/guides/building-agents">
+    Go deeper: learn how to structure multi-handler agents, chain events, and handle errors.
+  </Card>
+  <Card title="Core Concepts" icon="book-open" href="/concepts">
+    Understand the mental model behind the event bus, handler lifecycle, and event contracts.
+  </Card>
+</CardGroup>

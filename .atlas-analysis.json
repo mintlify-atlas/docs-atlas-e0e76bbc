@@ -1,23 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "EDA Agent",
+  "projectType": "general",
+  "projectName": "EDA Agent",
+  "projectDescription": "A software agent built on an event-driven architecture that reacts to, processes, and emits events to orchestrate distributed workflows.",
   "theme": "luma",
-  "colors": {
-    "primary": "#6366F1",
-    "light": "#818CF8",
-    "dark": "#4338CA"
-  },
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/hodophile/eda-agent"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/hodophile/eda-agent"
-    }
-  },
+  "primaryColor": "#6366F1",
+  "lightColor": "#818CF8",
+  "darkColor": "#4338CA",
   "navigation": {
     "tabs": [
       {
@@ -68,5 +56,22 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "Event-driven agent orchestration",
+    "Asynchronous event publishing and subscription",
+    "Decoupled component communication via event bus",
+    "Configurable event handlers and middleware",
+    "Distributed workflow coordination",
+    "Fault-tolerant event processing with error handling"
+  ],
+  "publicApiSurface": [
+    "Agent — core agent class",
+    "EventBus — publish/subscribe message bus",
+    "EventHandler — base handler interface",
+    "publish(event) — emit an event onto the bus",
+    "subscribe(eventType, handler) — register a handler for an event type",
+    "start() — initialise and start the agent",
+    "stop() — gracefully shut down the agent"
+  ]
 }

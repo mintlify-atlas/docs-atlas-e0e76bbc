@@ -1,0 +1,48 @@
+---
+title: "EDA Agent Concepts Overview"
+sidebarTitle: "Concepts"
+description: "A high-level map of EDA Agent's core concepts: events, the event bus, handlers, and the agent lifecycle. Links to detailed concept pages."
+---
+
+EDA Agent is built on four interlocking concepts that together form a complete model for building reactive, autonomous software agents. Understanding these concepts — and how they relate to one another — will help you design systems that are easy to extend, straightforward to test, and resilient under load. This page gives you the map; follow the cards below to explore each territory in depth.
+
+<CardGroup cols={2}>
+  <Card title="Event-Driven Architecture" icon="diagram-project" href="/concepts/event-driven-architecture">
+    The foundational pattern that EDA Agent is built on: what events are, how they differ from commands and queries, and why asynchronous message passing unlocks loose coupling at scale.
+  </Card>
+  <Card title="Agent Lifecycle" icon="arrows-spin" href="/concepts/agent-lifecycle">
+    How an agent transitions through its states — initialising, running, draining, and stopped — and what hooks are available at each phase for setup, teardown, and observability.
+  </Card>
+  <Card title="Event Bus" icon="bus" href="/concepts/event-bus">
+    The internal message backbone that routes published events to matching subscribers, manages concurrency, and provides extension points for middleware such as logging, tracing, and retry policies.
+  </Card>
+  <Card title="Event Handlers" icon="bolt" href="/concepts/event-handlers">
+    The units of work that give your agent its behaviour: how to write, register, and compose handlers, how errors are contained, and patterns for fan-out, aggregation, and chained events.
+  </Card>
+</CardGroup>
+
+## Event-Driven Architecture
+
+Event-Driven Architecture (EDA) is a software design pattern in which components communicate by emitting and reacting to events — records of things that have already happened — rather than by invoking each other directly. In EDA Agent, every significant occurrence in your system is modelled as a typed `Event` object with a `type` string, a `payload`, and optional metadata. This page explains the theoretical underpinning of the pattern, contrasts events with commands and queries, and walks through the tradeoffs you should weigh when deciding where event-driven design is (and isn't) the right tool.
+
+## Agent Lifecycle
+
+An EDA Agent instance moves through a well-defined sequence of states from the moment it is created to the moment it shuts down. Understanding this lifecycle tells you when handlers can safely be registered, when the event bus begins dispatching, and how to hook into initialisation and teardown for tasks like opening database connections, registering signal handlers, or flushing telemetry buffers. This page documents each lifecycle state, the transitions between them, and the `start` / `stop` API that drives them.
+
+## Event Bus
+
+The `EventBus` is the nervous system of every EDA Agent application. It maintains a registry mapping event type strings to arrays of handler functions, dispatches events asynchronously with configurable concurrency, and isolates handler failures so that one misbehaving subscriber cannot affect others. This page covers how the bus routes events, how middleware is layered onto the dispatch pipeline, how to configure an external broker backend for cross-process messaging, and how to instrument the bus for observability.
+
+## Event Handlers
+
+Event handlers are the functions that give your agent its behaviour. Each handler subscribes to one or more event types and performs a unit of work — calling an API, writing to a database, emitting a follow-on event, or updating local state — whenever a matching event is published. This page covers the handler function signature, synchronous versus asynchronous handlers, error handling and retry semantics, fan-out and aggregation patterns, and how to test handlers in isolation without running a full agent.
+
+## Mental Model
+
+These four concepts form a clean loop at runtime. An **Agent** is started, which initialises the **Event Bus** and signals readiness. External triggers — user actions, scheduled jobs, webhook payloads, messages from peer agents — are translated into **Events** and published onto the bus. The bus inspects each event's `type`, looks up every matching **Event Handler**, and invokes them concurrently. Each handler performs its work and may itself publish new events, continuing the cycle.
+
+The **Agent Lifecycle** governs this loop from the outside: it controls when the bus starts accepting events, ensures in-flight handlers are allowed to finish during shutdown, and provides observable state transitions that your infrastructure can monitor. Because each concept has a single, well-scoped responsibility — the bus routes, handlers act, events carry data, the agent orchestrates — you can understand, test, and evolve each piece independently without needing to hold the entire system in your head at once.
+
+<Tip>
+  A useful exercise when designing a new feature is to ask: "What event does this produce, and what should happen in response?" Starting from that question almost always leads to cleaner boundaries than starting from the implementation.
+</Tip>

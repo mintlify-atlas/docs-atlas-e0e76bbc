@@ -1,0 +1,235 @@
+---
+title: "Error Handling and Resilience in EDA Agent"
+sidebarTitle: "Error Handling"
+description: "Configure error handling, retries, timeouts, and dead-letter queues in EDA Agent to build fault-tolerant event-driven workflows."
+---
+
+In asynchronous, event-driven systems, errors are not exceptions to the norm — they are an expected part of runtime behaviour. Networks time out, downstream services return 500s, databases deadlock, and payloads occasionally contain unexpected shapes. Because handlers execute independently and asynchronously, a failure in one handler has no direct call stack to propagate to, which means the application cannot rely on a simple `try/catch` at a central entry point. EDA Agent provides a layered resilience model — per-handler retries, configurable timeouts, a global error callback, and composable dead-letter patterns — so you can respond appropriately to every class of failure without defensive boilerplate scattered across every handler.
+
+## Handler Errors
+
+When a handler throws an unhandled exception (or returns a rejected promise), EDA Agent catches the error automatically and prevents it from crashing the process. If `retries` is greater than zero, the handler is retried; once all attempts are exhausted the error is forwarded to the `onError` callback if one is configured.
+
+By default — without retries and without `onError` — errors are silently swallowed. In practice you should always provide an `onError` handler so that failures are at least logged.
+
+```typescript
+import { Agent } from 'eda-agent';
+
+const agent = new Agent({
+  name: 'order-agent',
+  onError: (error, event) => {
+    // This is the safety net — called for every unhandled handler error
+    console.error(`[order-agent] Handler failed for event "${event.type}":`, error.message);
+  },
+});
+
+agent.subscribe('order.placed', async (event) => {
+  // If this throws, the error is forwarded to onError
+  const result = await callPaymentService(event.payload);
+  if (!result.ok) {
+    throw new Error(`Payment service returned ${result.status}`);
+  }
+});
+
+await agent.start();
+```
+
+Errors thrown inside a handler do **not** affect other handlers registered for the same event type — each handler runs and fails independently.
+
+## The onError Callback
+
+The `onError` callback is your global safety net. It receives the `Error` object and the original `Event` that triggered the failing handler, giving you everything you need to log, alert, or route the failure.
+
+```typescript
+const agent = new Agent({
+  name: 'my-agent',
+  onError: (error, event) => {
+    console.error(`Handler failed for event ${event.type}:`, error);
+    // Send to monitoring, dead-letter queue, etc.
+  },
+});
+```
+
+A production `onError` callback typically does several things at once:
+
+```typescript
+import { Agent } from 'eda-agent';
+import { logger }  from './logger';
+import { metrics } from './metrics';
+import { alerts }  from './alerting';
+
+const agent = new Agent({
+  name: 'fulfillment-agent',
+  onError: (error, event) => {
+    // Structured log with full context
+    logger.error({
+      err:           error,
+      eventType:     event.type,
+      eventId:       event.metadata?.id,
+      correlationId: event.metadata?.correlationId,
+    }, 'Handler permanently failed');
+
+    // Increment an error counter in your metrics system
+    metrics.increment('agent.handler.error', { eventType: event.type });
+
+    // Page on-call for critical domains
+    if (event.type.startsWith('payment.')) {
+      alerts.page('Payment handler failure', { event, error });
+    }
+  },
+});
+```
+
+<Warning>
+  If `onError` itself throws, EDA Agent cannot catch that exception — it will propagate up and may crash the process. Always wrap `onError` body in a `try/catch` if it performs any fallible operations such as network calls or disk writes.
+</Warning>
+
+## Configuring Retries
+
+Set the `retries` option to automatically re-attempt a failing handler before surfacing the error to `onError`. A value of `n` means the handler will be called up to `n + 1` times total.
+
+```typescript
+const agent = new Agent({
+  name: 'email-agent',
+  retries: 3,   // Up to 4 total attempts per handler invocation
+  onError: (error, event) => {
+    logger.error({ err: error, type: event.type }, 'Handler failed after 4 attempts');
+  },
+});
+
+agent.subscribe('user.registered', async (event) => {
+  // If the SMTP server is temporarily unavailable, this handler will be
+  // retried up to 3 times before onError is invoked.
+  await smtpClient.send({
+    to:      event.payload.email,
+    subject: 'Welcome to the platform',
+  });
+});
+```
+
+<Note>
+  EDA Agent retries immediately by default — there is no built-in exponential backoff between attempts. If your use case requires progressive backoff to avoid hammering a struggling dependency, implement it inside the handler using a `sleep` utility before re-throwing, or use a dedicated retry library such as `p-retry` inside the handler body. Each retry is a fresh invocation of the handler function, so any await-based delay placed before the first `throw` will be respected.
+</Note>
+
+```typescript
+import pRetry from 'p-retry';
+
+agent.subscribe('payment.capture', async (event) => {
+  await pRetry(
+    () => paymentGateway.capture(event.payload.chargeId),
+    {
+      retries: 3,
+      minTimeout: 500,
+      factor: 2,  // Exponential backoff: 500 ms, 1 s, 2 s
+    }
+  );
+});
+```
+
+## Timeouts
+
+The `timeout` option sets a maximum wall-clock duration for each individual handler execution. If a handler has not resolved or rejected within the specified number of milliseconds, it is cancelled and the cancellation is surfaced as an error — subject to the `retries` policy and ultimately forwarded to `onError`.
+
+```typescript
+const agent = new Agent({
+  name: 'api-agent',
+  timeout: 5_000,   // Handlers must complete within 5 seconds
+  retries: 1,
+  onError: (error, event) => {
+    if (error.message.includes('timeout')) {
+      logger.warn({ type: event.type }, 'Handler timed out');
+    } else {
+      logger.error({ err: error, type: event.type }, 'Handler failed');
+    }
+  },
+});
+```
+
+<Tip>
+  Set `timeout` to a value that is meaningfully shorter than the SLA for the operation your handler performs. For example, if your payment provider must respond within 10 seconds, set `timeout` to 8 000 ms so you have headroom to log the failure and retry before the SLA window closes.
+</Tip>
+
+<Warning>
+  A timed-out handler is cancelled, but any side effects that already occurred before the cancellation point are **not** rolled back. If a handler has partially completed work — for example, it debited an account but had not yet recorded the transaction — a timeout will leave that state inconsistent. Design handlers to be idempotent and to use database transactions or compensating actions where atomicity is required.
+</Warning>
+
+## Idempotent Handlers
+
+When `retries` is greater than zero, the same event may be delivered to the same handler multiple times. Idempotency means that executing a handler more than once with the same event produces exactly the same outcome as executing it once. Without idempotency, retries turn transient failures into data corruption.
+
+The most robust technique is to use the event's unique ID as an idempotency key:
+
+```typescript
+agent.subscribe('payment.authorised', async (event) => {
+  const eventId = event.metadata?.id;
+  if (!eventId) throw new Error('Event missing metadata.id — cannot guarantee idempotency');
+
+  // Only proceed if we haven't already processed this event
+  const alreadyProcessed = await db.idempotencyKeys.exists(eventId);
+  if (alreadyProcessed) {
+    console.log(`Skipping duplicate event ${eventId}`);
+    return;
+  }
+
+  // Perform the side-effecting work
+  await capturePayment(event.payload.chargeId);
+
+  // Record that this event has been processed — do this last, atomically if possible
+  await db.idempotencyKeys.set(eventId, { processedAt: Date.now() });
+});
+```
+
+Practical guidelines for writing idempotent handlers:
+
+- **Use upserts instead of inserts.** `INSERT … ON CONFLICT DO NOTHING` or equivalent is safer than a plain insert that will fail on a retry.
+- **Check before acting.** Query the current state before performing a mutation; if the mutation has already been applied, return early.
+- **Keep idempotency keys with a TTL.** Store processed event IDs with an expiry (e.g., 24 hours) to bound the storage cost.
+- **Publish events after side effects.** If a handler both writes to a database and publishes a follow-up event, publish only after the write commits so that a retry does not re-publish an event for a write that never completed.
+
+## Dead-Letter Patterns
+
+A dead-letter queue (DLQ) is a holding area for events that have permanently failed — exhausted all retries — so they can be inspected, replayed, or discarded manually without blocking the main processing pipeline. EDA Agent does not include a built-in DLQ, but you can implement one cleanly inside `onError` by publishing the failed event onto a dedicated event type.
+
+```typescript
+const agent = new Agent({
+  name: 'order-agent',
+  retries: 3,
+  onError: (error, event) => {
+    // Route permanently failed events to the dead-letter handler
+    agent.publish({
+      type: 'dlq.failed',
+      payload: {
+        originalEvent: event,
+        error:         error.message,
+        failedAt:      Date.now(),
+      },
+    });
+  },
+});
+
+// The DLQ handler persists failed events to a store for later inspection
+agent.subscribe('dlq.failed', async (event) => {
+  const { originalEvent, error, failedAt } = event.payload as {
+    originalEvent: unknown;
+    error:         string;
+    failedAt:      number;
+  };
+
+  await deadLetterStore.insert({
+    event:    originalEvent,
+    error,
+    failedAt,
+  });
+
+  // Optionally alert on-call if the DLQ starts growing
+  await alerting.notify(`DLQ received failed event: ${JSON.stringify(originalEvent)}`);
+});
+```
+
+<Tip>
+  Build a small admin script or internal endpoint that reads from your dead-letter store and re-publishes events using `agent.publish()`. This gives you a manual replay mechanism so that once the root cause of a failure is fixed, you can reprocess all affected events without data loss.
+</Tip>
+
+<Note>
+  The `dlq.failed` handler itself could fail — for example if the dead-letter store is unavailable. Make this handler as simple and as fault-tolerant as possible. Avoid dependencies on the same infrastructure that caused the original failure. Writing to a local file or a separate database is safer than writing to the same service that failed.
+</Note>

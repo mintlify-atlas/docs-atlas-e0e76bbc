@@ -1,0 +1,180 @@
+---
+title: "Publishing Events to the EDA Agent Bus"
+sidebarTitle: "Publishing Events"
+description: "Learn how to publish events in EDA Agent — defining event contracts, attaching metadata, publishing from handlers, and batching strategies."
+---
+
+Publishing is the act of placing a new event onto the agent's internal bus so that every registered handler for that event type can react to it. In an event-driven system, publishing decouples the code that detects something happened from the code that responds to it — the publisher does not know, and does not need to know, which handlers are listening. This separation is what makes event-driven architectures easy to extend: adding a new reaction to an existing event is as simple as calling `agent.subscribe()` in a new module, with no changes to the publishing code.
+
+## The Event Object
+
+Every call to `agent.publish()` accepts a single object that conforms to the `Event` interface. Understanding each field helps you design expressive, traceable event contracts.
+
+```typescript
+interface Event<T = unknown> {
+  type: string;      // Namespaced event type, e.g. 'order.placed'
+  payload: T;        // Event-specific data — the facts about what happened
+  metadata?: {
+    id?: string;           // Unique event ID (auto-generated if omitted)
+    timestamp?: number;    // Unix ms timestamp (auto-set if omitted)
+    source?: string;       // Name of the publishing agent
+    correlationId?: string; // For tracing a chain of related events
+  };
+}
+```
+
+The `type` field is the primary routing key — the agent uses it to dispatch the event to the correct set of handlers. The `payload` carries all domain-specific data. The optional `metadata` block exists for observability: correlation IDs let you stitch together a sequence of events that all originated from a single user action or request.
+
+## Publishing an Event
+
+Call `agent.publish()` with an event object. The method is asynchronous and resolves once the event has been accepted by the internal bus and dispatched to the relevant handlers (subject to the configured `concurrency` limit).
+
+```typescript
+// Minimal publish — only type and payload are required
+await agent.publish({
+  type: 'user.registered',
+  payload: {
+    userId: 'usr_abc123',
+    email: 'alice@example.com',
+    plan: 'pro',
+  },
+});
+```
+
+You can include metadata to improve traceability in distributed systems:
+
+```typescript
+import { randomUUID } from 'crypto';
+
+await agent.publish({
+  type: 'order.placed',
+  payload: {
+    orderId: 'ord_789',
+    userId:  'usr_abc123',
+    total:   149.99,
+    items:   [{ sku: 'WIDGET-1', qty: 2 }],
+  },
+  metadata: {
+    id:            randomUUID(),
+    timestamp:     Date.now(),
+    source:        'checkout-service',
+    correlationId: 'req_trace_456',
+  },
+});
+```
+
+Publishing multiple events in sequence is straightforward — await each one, or run them concurrently with `Promise.all` when the events are independent of each other:
+
+```typescript
+// Sequential — when order matters
+await agent.publish({ type: 'payment.authorised', payload: { orderId } });
+await agent.publish({ type: 'order.confirmed',    payload: { orderId } });
+
+// Concurrent — when events are independent
+await Promise.all([
+  agent.publish({ type: 'analytics.page-view', payload: { page: '/home' } }),
+  agent.publish({ type: 'analytics.session',   payload: { sessionId }    }),
+]);
+```
+
+## Event Naming Conventions
+
+EDA Agent does not enforce a naming scheme, but adopting a consistent convention from the start prevents confusion as the number of event types grows.
+
+The recommended pattern is **`domain.action`** — a dot-separated pair where the first segment identifies the business domain and the second describes what happened (always in the past tense):
+
+| Domain | Action | Full type |
+|--------|--------|-----------|
+| `user` | `registered` | `user.registered` |
+| `user` | `deleted` | `user.deleted` |
+| `order` | `placed` | `order.placed` |
+| `order` | `shipped` | `order.shipped` |
+| `order` | `cancelled` | `order.cancelled` |
+| `payment` | `authorised` | `payment.authorised` |
+| `payment` | `failed` | `payment.failed` |
+| `inventory` | `reserved` | `inventory.reserved` |
+
+For internal infrastructure events you may use a separate domain such as `dlq` (dead-letter queue) or `agent` to distinguish them from business events at a glance.
+
+<Tip>
+  Keep event type strings as exported constants in a shared `events/types.ts` module. Referencing `EventTypes.ORDER_PLACED` instead of the raw string `'order.placed'` everywhere eliminates typos and makes refactoring safe — a TypeScript rename refactor will catch every reference automatically.
+</Tip>
+
+## Publishing from Handlers
+
+Handlers are allowed to call `agent.publish()`, enabling you to build **event chains** — sequences of events where each step triggers the next. This is a powerful pattern for breaking complex workflows into small, independently testable steps.
+
+```typescript
+agent.subscribe('order.placed', async (event) => {
+  const { orderId, userId, total } = event.payload as OrderPlacedPayload;
+
+  // Process the order
+  await reserveInventory(orderId, event.payload.items);
+
+  // Emit the next event in the chain — downstream handlers will react
+  await agent.publish({
+    type: 'inventory.reserved',
+    payload: { orderId },
+    metadata: { correlationId: event.metadata?.correlationId },
+  });
+});
+
+agent.subscribe('inventory.reserved', async (event) => {
+  const { orderId } = event.payload as { orderId: string };
+  await notifyWarehouse(orderId);
+
+  await agent.publish({
+    type: 'warehouse.notified',
+    payload: { orderId },
+  });
+});
+```
+
+<Warning>
+  Publishing from a handler creates an event chain that must eventually terminate. If handler A publishes event X, and the handler for event X publishes event Y, and the handler for event Y publishes event X again, you have an **infinite loop**. This will exhaust the concurrency pool, consume all available memory, and crash the process. Always ensure that the chain of events converges to a terminal event with no further publishing, and add guard conditions (such as a `processed` flag in the payload) when cycles are theoretically possible.
+</Warning>
+
+## Typing Your Events
+
+TypeScript generics let you attach a concrete payload type to a `publish()` call. The generic parameter flows through to the `payload` field, giving you full autocomplete and compile-time type checking.
+
+```typescript
+// Define payload interfaces alongside your event type constants
+interface UserRegisteredPayload {
+  userId: string;
+  email:  string;
+  plan:   'free' | 'pro';
+}
+
+interface OrderPlacedPayload {
+  orderId: string;
+  userId:  string;
+  total:   number;
+  items:   Array<{ sku: string; qty: number }>;
+}
+
+// TypeScript will enforce the shape of `payload`
+await agent.publish<UserRegisteredPayload>({
+  type:    'user.registered',
+  payload: { userId: 'usr_001', email: 'bob@example.com', plan: 'free' },
+});
+
+await agent.publish<OrderPlacedPayload>({
+  type:    'order.placed',
+  payload: {
+    orderId: 'ord_001',
+    userId:  'usr_001',
+    total:   49.99,
+    items:   [{ sku: 'WIDGET-2', qty: 1 }],
+  },
+});
+```
+
+The same generic parameter applies to the `Event<T>` type in handler signatures, so the payload is typed end-to-end without any manual casting:
+
+```typescript
+agent.subscribe('order.placed', async (event: Event<OrderPlacedPayload>) => {
+  // event.payload is fully typed — no `as` cast needed
+  console.log(event.payload.orderId, event.payload.total);
+});
+```

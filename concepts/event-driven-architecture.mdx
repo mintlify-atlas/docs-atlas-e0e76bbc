@@ -1,0 +1,120 @@
+---
+title: "Event-Driven Architecture: How EDA Agent Works"
+sidebarTitle: "EDA Overview"
+description: "Understand the event-driven architecture pattern that powers EDA Agent — events, producers, consumers, and why async decoupling makes agents more resilient."
+---
+
+Event-driven architecture (EDA) is a design paradigm in which components communicate by producing and reacting to discrete, immutable records called _events_ rather than invoking each other directly. EDA Agent is built on this pattern from the ground up, allowing you to compose sophisticated agent behaviours from small, independent pieces that each respond to exactly the events they care about — without any tight coupling between them.
+
+## What Is an Event?
+
+An event is an immutable record that describes something that has already happened. It is not a command telling another component what to do; it is a statement of fact — "a user was created", "a tool call completed", "an error occurred". Because events are records of the past, they can safely be shared with any number of consumers without risk of conflicting mutations.
+
+Every event in EDA Agent carries at minimum a `type` discriminator and a `payload` that holds the data relevant to that occurrence. An optional `metadata` envelope is available for cross-cutting concerns such as correlation IDs, timestamps, and tracing context.
+
+```typescript
+interface Event<T = unknown> {
+  /** A dot-namespaced string identifying the event kind, e.g. "user.created" */
+  type: string;
+
+  /** The domain-specific data associated with this event */
+  payload: T;
+
+  /** Optional cross-cutting metadata (timestamps, trace IDs, etc.) */
+  metadata?: Record<string, unknown>;
+}
+```
+
+<Info>
+  Choose `type` strings that read like past-tense facts: `user.created`,
+  `order.placed`, `tool.execution.completed`. Avoid imperative names like
+  `createUser` — those belong in command-oriented systems, not event-driven ones.
+</Info>
+
+## Producers and Consumers
+
+EDA Agent uses the **publish/subscribe** (pub/sub) model. A _producer_ publishes an event to the central event bus without knowing which consumers — if any — will handle it. Each _consumer_ (handler) declares which event types it wants to receive and is notified by the bus whenever a matching event is published.
+
+<Note>
+  **Event flow at a glance**
+
+  ```
+  Producer
+    │
+    │  bus.publish(event)
+    ▼
+  EventBus
+    ├──▶ Handler A  (subscribed to "user.created")
+    ├──▶ Handler B  (subscribed to "user.created")
+    └──▶ Handler C  (subscribed to "*.created")   ← wildcard (future)
+  ```
+
+  All matching handlers receive the same event object concurrently. The producer
+  does not wait for any of them to finish.
+</Note>
+
+This separation of concerns means that adding a new consumer never requires changes to the producer — you simply register another handler and the bus takes care of delivery.
+
+## Why Event-Driven for Agents?
+
+Traditional agent frameworks wire components together through direct function calls or synchronous request/response chains. This works for simple workflows but becomes fragile as agents grow. EDA Agent adopts an event-driven model because it naturally solves the most common scaling and resilience problems.
+
+<CardGroup cols={2}>
+  <Card title="Decoupled Components" icon="link-slash">
+    Producers and consumers share only an event contract (type + payload shape).
+    You can rewrite, replace, or add consumers without touching the code that
+    emits events.
+  </Card>
+  <Card title="Async Processing" icon="bolt">
+    Handlers run asynchronously. A slow handler does not block the producer or
+    other handlers, keeping the agent responsive under load.
+  </Card>
+  <Card title="Replay Capability" icon="rotate-left">
+    Because events are immutable records, they can be stored and replayed later
+    for debugging, testing, or bootstrapping new components from historical state.
+  </Card>
+  <Card title="Fault Isolation" icon="shield">
+    A handler that throws an error does not crash the bus or affect sibling
+    handlers processing the same event. Failures stay contained.
+  </Card>
+</CardGroup>
+
+## EDA vs. Request/Response
+
+| Dimension | Request / Response | Event-Driven (EDA Agent) |
+|---|---|---|
+| **Coupling** | Caller must know the callee | Producer knows only the event type |
+| **Execution** | Synchronous — caller waits | Asynchronous — producer moves on immediately |
+| **Fan-out** | One caller, one callee | One producer, many consumers |
+| **Failure blast radius** | Callee failure breaks caller | Handler failure is isolated |
+| **Traceability** | Call stack | Event log / audit trail |
+| **Extensibility** | Add new callee requires caller change | Add new consumer with zero producer changes |
+
+<Tip>
+  Request/response is still the right choice for queries that need an immediate
+  return value (e.g. fetching data from a database). EDA Agent does not prohibit
+  direct calls — it simply ensures that _side effects and state changes_ flow
+  through events so they remain observable and auditable.
+</Tip>
+
+## Event Flow in EDA Agent
+
+Understanding the exact sequence from publication to handler completion helps you reason about timing, error handling, and ordering guarantees.
+
+1. **Publication** — Your code (or a built-in system component) calls `agent.publish(event)`. The event object is frozen to enforce immutability and handed to the internal event bus.
+
+2. **Routing** — The bus looks up every handler registered for `event.type`. If no handlers are registered the event is silently dropped (no error is thrown).
+
+3. **Dispatch** — Each matching handler is invoked concurrently. The bus does not await the completion of one handler before starting another; all run in the same microtask turn.
+
+4. **Execution** — Each handler performs its logic — writing to a database, calling an external API, publishing further events, etc. Handlers that return a `Promise` are awaited internally so that async errors can be caught.
+
+5. **Error containment** — If a handler rejects or throws, the bus catches the error, emits a built-in `agent.error` event with the original event and the error as payload, and continues processing remaining handlers. The publisher is never interrupted.
+
+6. **Completion** — Once all handlers for the original event have either resolved or been caught, the publication cycle for that event is complete.
+
+<Info>
+  Steps 4–6 happen _after_ the `await agent.publish(event)` call returns to the
+  producer. From the producer's perspective, publishing is fire-and-forget.
+  Handler completion is asynchronous with respect to the publisher.
+</Info>

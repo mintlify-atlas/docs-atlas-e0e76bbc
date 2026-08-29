@@ -1,0 +1,174 @@
+---
+title: "Subscribing to Events in EDA Agent"
+sidebarTitle: "Subscribing to Events"
+description: "A guide to subscribing handlers to event types in EDA Agent — registration patterns, wildcard subscriptions, and unsubscribing cleanly."
+---
+
+Subscriptions are the consumer side of the event bus. When you subscribe a handler to an event type, you are telling the agent: "every time an event with this type arrives, invoke this function." Handlers are plain async (or sync) functions — they receive the full `Event` object and can perform any work: calling APIs, writing to a database, publishing further events, or updating shared state. The subscription system is the mechanism that turns a raw stream of events into meaningful, coordinated behaviour.
+
+## Basic Subscription
+
+Call `agent.subscribe(eventType, handler)` to register a handler. The first argument is the exact event type string to listen for; the second is any function that accepts an `Event` and returns a `Promise<void>` or `void`.
+
+```typescript
+import { Agent, Event } from 'eda-agent';
+
+const agent = new Agent({ name: 'notification-agent' });
+
+agent.subscribe('user.registered', async (event: Event) => {
+  const { userId, email } = event.payload as { userId: string; email: string };
+  await sendWelcomeEmail(email);
+  console.log(`Welcome email dispatched for user ${userId}`);
+});
+
+agent.subscribe('order.shipped', async (event: Event) => {
+  const { orderId, trackingCode } = event.payload as {
+    orderId: string;
+    trackingCode: string;
+  };
+  await sendShippingNotification(orderId, trackingCode);
+});
+
+await agent.start();
+```
+
+You can register **multiple handlers for the same event type**. EDA Agent invokes all matching handlers concurrently (subject to the `concurrency` limit) whenever a matching event is published.
+
+```typescript
+// Both handlers run when 'order.placed' is published
+agent.subscribe('order.placed', handleInventoryReservation);
+agent.subscribe('order.placed', handlePaymentCapture);
+agent.subscribe('order.placed', handleAnalyticsTracking);
+```
+
+<Note>
+  Handlers are matched by exact string equality. `'order.placed'` and `'Order.Placed'` are treated as different event types. Adopt a consistent lowercase naming convention (see the [Publishing Events](/guides/publishing-events) guide) to avoid silent mismatches.
+</Note>
+
+## Wildcard Subscriptions
+
+EDA Agent matches event types by exact string. There is no built-in wildcard or glob syntax. If you need a single handler to react to several related event types, the cleanest approach is to iterate over the list of types and register the handler for each one:
+
+```typescript
+const orderHandler = async (event: Event) => {
+  console.log(`Order event received: ${event.type}`, event.payload);
+  await logToAuditTrail(event);
+};
+
+// Register the same handler for every order event type
+['order.placed', 'order.updated', 'order.shipped', 'order.cancelled'].forEach(
+  (type) => agent.subscribe(type, orderHandler)
+);
+```
+
+If you need broad observability — for example, logging every event that passes through the agent — extract the common types into a constant array in your `events/types.ts` module and iterate at startup:
+
+```typescript
+import { ALL_EVENT_TYPES } from './events/types';
+
+ALL_EVENT_TYPES.forEach((type) => {
+  agent.subscribe(type, async (event) => {
+    await auditLogger.write({ type: event.type, ts: Date.now() });
+  });
+});
+```
+
+<Tip>
+  Keep the shared type array in a single place so that adding a new event type automatically extends your audit or logging subscription without requiring any changes to the subscription code itself.
+</Tip>
+
+## The Unsubscribe Handle
+
+`agent.subscribe()` returns an **unsubscribe function**. Calling that function removes the handler from the event bus immediately — subsequent events of that type will no longer invoke it. This is the preferred way to clean up subscriptions.
+
+```typescript
+// Capture the returned unsubscribe function
+const unsubscribe = agent.subscribe('feature-flag.updated', async (event) => {
+  await reloadFeatureFlags(event.payload);
+});
+
+// Later — remove the handler when it is no longer needed
+unsubscribe();
+```
+
+You can also remove a handler by passing the exact same function reference to `agent.unsubscribe()`:
+
+```typescript
+const handleOrderPlaced = async (event: Event) => {
+  await processOrder(event.payload);
+};
+
+agent.subscribe('order.placed', handleOrderPlaced);
+
+// Equivalent to calling the returned unsubscribe function
+agent.unsubscribe('order.placed', handleOrderPlaced);
+```
+
+<Note>
+  `agent.unsubscribe()` uses reference equality to identify the handler. Arrow functions defined inline at the call site cannot be unsubscribed this way because you have no reference to store. Always assign handlers that you intend to unsubscribe to a named variable or module-level function.
+</Note>
+
+A common pattern is to clean up all subscriptions when an agent stops, using the `onStop` lifecycle hook:
+
+```typescript
+const unsubscribers: Array<() => void> = [];
+
+unsubscribers.push(agent.subscribe('order.placed',    handleOrderPlaced));
+unsubscribers.push(agent.subscribe('order.cancelled', handleOrderCancelled));
+
+const agent = new Agent({
+  name: 'order-agent',
+  onStop: () => {
+    unsubscribers.forEach((unsub) => unsub());
+    console.log('All subscriptions removed');
+  },
+});
+```
+
+## Subscription Lifecycle
+
+Subscriptions can be registered **at any point** — before or after `agent.start()` — but event dispatching only begins once the agent is in the `'running'` state. Events published while the agent is in the `'created'` or `'starting'` state are queued internally and dispatched to registered handlers once start completes.
+
+<Note>
+  Register all subscriptions **before** calling `agent.start()`. Any subscription added while the agent is already running takes effect for events published after that moment. Events published between `start()` completing and a late `subscribe()` call will not be retroactively delivered to the newly registered handler.
+</Note>
+
+The recommended startup sequence is always:
+
+```typescript
+// 1. Construct the agent
+const agent = new Agent({ name: 'my-agent' });
+
+// 2. Register all subscriptions
+agent.subscribe('event.type.a', handlerA);
+agent.subscribe('event.type.b', handlerB);
+
+// 3. Start the agent — handlers are now active
+await agent.start();
+```
+
+## Ordering and Concurrency
+
+When multiple handlers are registered for the same event type, EDA Agent invokes them **concurrently by default**. The `concurrency` option on the agent controls the total number of handler executions running at any moment across all event types — it does not impose ordering.
+
+```typescript
+// These two handlers run at the same time when 'order.placed' fires
+agent.subscribe('order.placed', handleInventoryReservation);  // ~200 ms
+agent.subscribe('order.placed', handlePaymentCapture);         // ~500 ms
+// Total wall-clock time ≈ 500 ms, not 700 ms
+```
+
+If you need **sequential execution** for a set of operations triggered by a single event, keep all of that logic in a single handler and await each step:
+
+```typescript
+agent.subscribe('order.placed', async (event) => {
+  // Steps run in strict sequence within this handler
+  await reserveInventory(event.payload.orderId);
+  await capturePayment(event.payload.userId, event.payload.total);
+  await sendConfirmationEmail(event.payload.userId);
+});
+```
+
+<Tip>
+  If the sequential steps span different domains, consider publishing a new event after each step completes (e.g., publish `inventory.reserved` once reservation succeeds, then let a separate handler capture payment). This keeps each handler small, testable, and independently retryable — one of the key benefits of an event-driven design.
+</Tip>

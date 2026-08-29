@@ -1,0 +1,234 @@
+---
+title: "Event Types and Schemas in EDA Agent"
+sidebarTitle: "Event Types"
+description: "Reference for the Event, EventMetadata, and PublishInput types used across EDA Agent — fields, typing patterns, and naming conventions."
+---
+
+EDA Agent's event system is built around three TypeScript interfaces — `Event<T>`, `EventMetadata`, and `PublishInput<T>` — that together define the complete shape of every message flowing through the bus. All three are generic: the type parameter `T` represents the payload, allowing the TypeScript compiler to enforce payload shapes end-to-end from the call site of `agent.publish()` all the way into each subscribed handler. This document describes every field on each interface, explains the relationship between `Event<T>` and `PublishInput<T>`, and shows practical patterns for building a well-typed event catalogue in a real application.
+
+---
+
+## `Event<T>` Interface
+
+`Event<T>` is the canonical envelope that the `EventBus` stores internally and passes to every registered handler. When you publish via `agent.publish()`, the agent wraps your `PublishInput<T>` into an `Event<T>`, filling in any missing metadata fields before dispatch.
+
+```typescript
+interface Event<T = unknown> {
+  type: string;
+  payload: T;
+  metadata?: EventMetadata;
+}
+```
+
+<ParamField path="type" type="string" required>
+  A namespaced string identifier for the event. Handlers are matched by exact equality against this value, so the string must be stable and agreed upon between publishers and subscribers. The recommended convention is `domain.action` in lowercase — see the [Naming Conventions](#naming-conventions) section for details and examples.
+</ParamField>
+
+<ParamField path="payload" type="T" required>
+  The event data. The generic parameter `T` constrains the shape of this value; when `T` is omitted it defaults to `unknown`, which requires a type guard inside the handler before the payload can be used safely. Providing an explicit `T` gives you full IntelliSense and compile-time safety.
+</ParamField>
+
+<ParamField path="metadata" type="EventMetadata">
+  Optional envelope fields added by the agent at publish time. You can inspect these inside a handler to retrieve the event's unique ID, origin timestamp, source agent name, or correlation token. See the [`EventMetadata`](#eventmetadata-interface) section for the full field list.
+</ParamField>
+
+---
+
+## `EventMetadata` Interface
+
+`EventMetadata` carries the operational envelope that travels with every event — information about *when* the event was created, *where* it came from, and *which request chain* it belongs to. All fields are optional; when you omit them in a `PublishInput`, the agent fills them in automatically before handing the event to the bus.
+
+```typescript
+interface EventMetadata {
+  id?: string;
+  timestamp?: number;
+  source?: string;
+  correlationId?: string;
+}
+```
+
+<ResponseField name="id" type="string">
+  A unique identifier for this specific event instance. Auto-generated as a UUID (e.g. `'f47ac10b-58cc-4372-a567-0e02b2c3d479'`) by the agent if omitted. Useful for idempotency checks — if your handler writes to a database, storing `event.metadata.id` lets you safely deduplicate replayed or retried events.
+</ResponseField>
+
+<ResponseField name="timestamp" type="number">
+  The Unix epoch time in milliseconds at which the event was published. Set automatically to `Date.now()` by the agent if omitted. Use this field to compute event age, apply time-based filtering, or record when a domain action originally occurred (as opposed to when the handler processed it).
+</ResponseField>
+
+<ResponseField name="source" type="string">
+  The `name` of the agent that published this event. When you call `agent.publish()`, the agent populates this field from `agent.name` automatically. In multi-agent systems this lets subscribers determine the origin of an event without encoding that information in the event type or payload.
+</ResponseField>
+
+<ResponseField name="correlationId" type="string">
+  An opaque string that links a chain of related events together — for example, all events triggered by a single incoming HTTP request. When present, pass it unchanged in the `metadata` of any downstream events your handler publishes. This propagation pattern forms a correlation chain that can be visualised in distributed tracing tools.
+</ResponseField>
+
+<Tip>
+  Access metadata inside a handler through `event.metadata`:
+
+  ```typescript
+  agent.subscribe<OrderPlaced>('order.placed', (event) => {
+    const { id, timestamp, source, correlationId } = event.metadata ?? {};
+    logger.info({ id, correlationId, source }, 'Handling order.placed');
+  });
+  ```
+</Tip>
+
+---
+
+## `PublishInput<T>` Interface
+
+`PublishInput<T>` is the type accepted by `agent.publish()`. It has the same shape as `Event<T>` but semantically it is the *input* form of an event — the agent enriches it into a full `Event<T>` (filling in `metadata.id`, `metadata.timestamp`, and `metadata.source`) before routing it to subscribers.
+
+```typescript
+interface PublishInput<T = unknown> {
+  type: string;
+  payload: T;
+  metadata?: EventMetadata;
+}
+```
+
+<ResponseField name="type" type="string">
+  The event type string. Required. Same constraints as `Event<T>.type`.
+</ResponseField>
+
+<ResponseField name="payload" type="T">
+  The event payload. Required. Constrained by the generic parameter `T`.
+</ResponseField>
+
+<ResponseField name="metadata" type="EventMetadata">
+  Optional partial metadata. Any fields you provide are preserved; fields you omit are filled in by the agent. This means you can supply a `correlationId` from an inbound request without having to generate an `id` or `timestamp` yourself.
+</ResponseField>
+
+<Note>
+  The distinction between `PublishInput<T>` and `Event<T>` is primarily semantic. Handlers always receive a fully populated `Event<T>` where the auto-generated fields are guaranteed to be present. When you call `agent.publish()`, you work with `PublishInput<T>` and let the agent handle the bookkeeping.
+</Note>
+
+---
+
+## Typing Event Payloads
+
+Defining payload types as named TypeScript interfaces and grouping them in a dedicated module is the recommended approach for any project with more than a handful of event types. It creates a single source of truth for your event catalogue that both publishers and subscribers can import, and it makes schema evolution traceable through version control.
+
+```typescript
+// events/types.ts
+
+export interface UserCreated {
+  userId: string;
+  name: string;
+  email: string;
+  createdAt: string; // ISO 8601 string
+}
+
+export interface OrderPlaced {
+  orderId: string;
+  userId: string;
+  items: Array<{ sku: string; qty: number; price: number }>;
+  total: number;
+}
+
+export interface PaymentFailed {
+  orderId: string;
+  reason: string;
+  attemptedAt: string; // ISO 8601 string
+}
+```
+
+With the payload interfaces in place, publish and subscribe calls are fully type-safe:
+
+```typescript
+import { UserCreated, OrderPlaced, PaymentFailed } from './events/types';
+
+// Type-safe publish — TypeScript will error if the payload
+// doesn't match the UserCreated interface.
+await agent.publish<UserCreated>({
+  type: 'user.created',
+  payload: {
+    userId: 'u_1',
+    name: 'Alice',
+    email: 'alice@example.com',
+    createdAt: new Date().toISOString(),
+  },
+});
+
+// Type-safe subscribe — event.payload is inferred as OrderPlaced.
+agent.subscribe<OrderPlaced>('order.placed', async (event) => {
+  const { orderId, total, items } = event.payload; // fully typed
+  await fulfillOrder(orderId, items);
+  await sendOrderConfirmation(event.payload.userId, orderId, total);
+});
+
+// Correlating a downstream event to the triggering event.
+agent.subscribe<OrderPlaced>('order.placed', async (event) => {
+  await agent.publish<PaymentFailed>({
+    type: 'payment.failed',
+    payload: {
+      orderId: event.payload.orderId,
+      reason: 'Insufficient funds',
+      attemptedAt: new Date().toISOString(),
+    },
+    metadata: {
+      // Forward the correlationId so the failure is traceable
+      // back to the original request.
+      correlationId: event.metadata?.correlationId,
+    },
+  });
+});
+```
+
+<Tip>
+  Co-locate your event type interfaces with a string-literal constant for each event type to eliminate magic strings throughout your codebase:
+
+  ```typescript
+  // events/types.ts
+  export const EVENT_TYPES = {
+    USER_CREATED:   'user.created',
+    ORDER_PLACED:   'order.placed',
+    PAYMENT_FAILED: 'payment.failed',
+  } as const;
+
+  export type EventTypeKey = typeof EVENT_TYPES[keyof typeof EVENT_TYPES];
+  ```
+
+  Then use the constants instead of raw strings:
+
+  ```typescript
+  import { EVENT_TYPES, OrderPlaced } from './events/types';
+
+  agent.subscribe<OrderPlaced>(EVENT_TYPES.ORDER_PLACED, handler);
+  await agent.publish<OrderPlaced>({ type: EVENT_TYPES.ORDER_PLACED, payload: { ... } });
+  ```
+</Tip>
+
+---
+
+## Naming Conventions
+
+EDA Agent imposes no restrictions on event type strings — any non-empty string is accepted. However, adopting a consistent naming convention from the start pays dividends as your event catalogue grows.
+
+**Recommended pattern: `domain.action`**
+
+Event type strings should be:
+- **Lowercase** throughout.
+- **Dot-separated** using a single dot between the domain segment and the action segment.
+- **Past tense** for facts about things that have already happened (the overwhelming majority of domain events).
+- **Noun-first, verb-second** within the action segment when the subject is implied by the domain.
+
+| Event Type | Domain | Action | Notes |
+|---|---|---|---|
+| `user.created` | `user` | `created` | New account registered |
+| `user.deleted` | `user` | `deleted` | Account removed |
+| `order.placed` | `order` | `placed` | Customer submitted an order |
+| `order.cancelled` | `order` | `cancelled` | Order cancelled before fulfilment |
+| `payment.processed` | `payment` | `processed` | Payment captured successfully |
+| `payment.failed` | `payment` | `failed` | Payment attempt was declined |
+| `sensor.reading` | `sensor` | `reading` | IoT telemetry data point |
+| `email.sent` | `email` | `sent` | Outbound email delivered |
+
+<Note>
+  For complex domains with multiple sub-resources, a three-segment pattern — `domain.resource.action` — is a natural extension: `inventory.item.reserved`, `auth.session.expired`, `warehouse.shipment.dispatched`. Keep nesting shallow; more than three segments rarely adds clarity.
+</Note>
+
+<Warning>
+  Because handlers are matched by exact string equality, a typo in either a `publish` call or a `subscribe` call will silently result in events never reaching their intended handlers. The `EVENT_TYPES` constant pattern shown in the [Typing Event Payloads](#typing-event-payloads) section eliminates this class of bug entirely by making the TypeScript compiler your spell-checker.
+</Warning>

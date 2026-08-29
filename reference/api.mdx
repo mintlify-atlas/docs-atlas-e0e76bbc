@@ -1,0 +1,488 @@
+---
+title: "EDA Agent API Reference"
+sidebarTitle: "API Reference"
+description: "Complete API reference for EDA Agent's Agent and EventBus classes — constructor options, methods, types, and return values."
+---
+
+EDA Agent exposes two primary classes — `Agent` and `EventBus` — along with a set of TypeScript interfaces and utility types that together form the complete public API surface. `Agent` is the high-level abstraction you work with day-to-day: it owns a lifecycle (`start` / `stop`), manages concurrency and retries, and delegates message routing to its internal `EventBus`. `EventBus` is the low-level pub/sub backbone that you can also access directly through `agent.bus` when you need fine-grained control over subscription management. This reference documents every constructor option, method signature, parameter, and return type for both classes.
+
+---
+
+## `Agent` Class
+
+The `Agent` class is the central building block of an EDA Agent application. Each agent wraps an `EventBus`, enforces configurable concurrency and timeout policies, and exposes lifecycle hooks that let you initialise external connections before events begin flowing and flush resources cleanly when the agent is shut down.
+
+### Constructor
+
+```typescript
+import { Agent } from 'eda-agent';
+
+const agent = new Agent({
+  name: 'order-processor',
+  concurrency: 5,
+  timeout: 15000,
+  retries: 2,
+  onStart: async () => {
+    await db.connect();
+  },
+  onStop: async () => {
+    await db.disconnect();
+  },
+  onError: (error, event) => {
+    console.error(`Unhandled error on event "${event.type}":`, error);
+  },
+});
+```
+
+<ParamField path="name" type="string" required>
+  A human-readable identifier for this agent. Used in log output, error messages, and automatically set as `metadata.source` on every event this agent publishes. Must be a non-empty string.
+</ParamField>
+
+<ParamField path="concurrency" type="number" default="10">
+  The maximum number of event handler invocations that may execute in parallel within this agent. When the limit is reached, additional incoming events are queued until a slot becomes free. Must be at least `1`.
+</ParamField>
+
+<ParamField path="timeout" type="number" default="30000">
+  Milliseconds to wait for a single handler invocation to complete before it is considered timed out and cancelled. Set to `0` to disable the timeout entirely. Must be a non-negative integer.
+</ParamField>
+
+<ParamField path="retries" type="number" default="0">
+  Number of times a failing handler will be retried before the error is forwarded to `onError`. Retries are spaced with exponential backoff. Set to `0` to disable retries. Must be a non-negative integer.
+</ParamField>
+
+<ParamField path="onStart" type="() => Promise<void> | void">
+  An optional lifecycle hook invoked once after the internal `EventBus` is initialised and before the agent begins processing events. Ideal for establishing database connections, loading configuration from remote sources, or warming up caches. May be synchronous or return a `Promise`.
+</ParamField>
+
+<ParamField path="onStop" type="() => Promise<void> | void">
+  An optional lifecycle hook invoked once during graceful shutdown, after all in-flight events have been drained. Use it to close connections, flush buffers, or perform final cleanup. May be synchronous or return a `Promise`.
+</ParamField>
+
+<ParamField path="onError" type="(error: Error, event: Event) => void">
+  An optional global error handler that receives any uncaught exception thrown by an event handler after all retry attempts have been exhausted. Receives the `Error` object and the `Event` that triggered the failed handler. If omitted, unhandled handler errors are silently discarded.
+</ParamField>
+
+---
+
+### `start()`
+
+Transitions the agent from `'created'` or `'stopped'` to `'running'`. During startup the agent sets its internal state to `'starting'`, calls `onStart` (if configured), and then marks itself as `'running'` and begins consuming queued events.
+
+```typescript
+async start(): Promise<void>
+```
+
+```typescript
+await agent.start();
+console.log(agent.state); // 'running'
+```
+
+<ResponseField name="returns" type="Promise<void>">
+  Resolves once the agent is fully started and `onStart` has completed. Rejects if `onStart` throws, leaving the agent in a faulted state.
+</ResponseField>
+
+<Note>
+  Calling `start()` on an agent that is already `'running'` or `'starting'` is a no-op and returns a resolved promise immediately.
+</Note>
+
+---
+
+### `stop()`
+
+Initiates a graceful shutdown. The agent stops accepting new event publications, waits for all in-flight handler invocations to complete (up to the configured `timeout`), calls `onStop`, and then transitions to `'stopped'`.
+
+```typescript
+async stop(): Promise<void>
+```
+
+```typescript
+await agent.stop();
+console.log(agent.state); // 'stopped'
+```
+
+<ResponseField name="returns" type="Promise<void>">
+  Resolves once `onStop` has completed and the agent has fully stopped. Rejects if `onStop` throws.
+</ResponseField>
+
+<Warning>
+  Once stopped, the agent will not process any events published to its bus until `start()` is called again. Subscriptions registered before `stop()` are preserved and will resume handling events after restart.
+</Warning>
+
+---
+
+### `publish()`
+
+Publishes a new event onto the agent's internal `EventBus`. All handlers subscribed to `event.type` will be invoked according to the configured concurrency, timeout, and retry policies.
+
+```typescript
+async publish<T = unknown>(event: PublishInput<T>): Promise<void>
+```
+
+<ParamField path="event" type="PublishInput<T>" required>
+  The event to publish. Must include a `type` string and a `payload`. An optional `metadata` object can carry tracing and correlation information.
+</ParamField>
+
+```typescript
+await agent.publish<{ orderId: string; total: number }>({
+  type: 'order.placed',
+  payload: { orderId: 'ord_42', total: 199.99 },
+  metadata: {
+    correlationId: 'req_abc123',
+  },
+});
+```
+
+<ResponseField name="returns" type="Promise<void>">
+  Resolves once the event has been accepted by the bus. Handler execution happens asynchronously — resolution does not imply that all handlers have finished running.
+</ResponseField>
+
+---
+
+### `subscribe()`
+
+Registers a handler function that will be called whenever an event with the given `eventType` is published on this agent's bus. Returns an `Unsubscribe` function for convenient one-liner cleanup.
+
+```typescript
+subscribe<T = unknown>(eventType: string, handler: EventHandler<T>): Unsubscribe
+```
+
+<ParamField path="eventType" type="string" required>
+  The exact event type string to listen for (e.g. `'order.placed'`). Wildcard patterns are not supported; each subscription targets a single event type.
+</ParamField>
+
+<ParamField path="handler" type="EventHandler<T>" required>
+  A function `(event: Event<T>) => Promise<void> | void` that will be invoked for each matching event. May be async. Errors thrown from a handler are subject to the agent's `retries` and `onError` policies.
+</ParamField>
+
+```typescript
+const unsubscribe = agent.subscribe<{ orderId: string }>('order.placed', async (event) => {
+  console.log('Processing order:', event.payload.orderId);
+  await fulfillOrder(event.payload.orderId);
+});
+
+// Later, when the subscription is no longer needed:
+unsubscribe();
+```
+
+<ResponseField name="returns" type="Unsubscribe">
+  A zero-argument function that, when called, removes this specific handler from the subscription. Equivalent to calling `agent.unsubscribe(eventType, handler)` directly.
+</ResponseField>
+
+---
+
+### `unsubscribe()`
+
+Removes a previously registered handler for the given event type. After this call the handler will no longer be invoked for new events of that type. Events already in flight may still invoke the handler if they were dispatched before `unsubscribe` was called.
+
+```typescript
+unsubscribe(eventType: string, handler: EventHandler): void
+```
+
+<ParamField path="eventType" type="string" required>
+  The event type the handler was originally subscribed to.
+</ParamField>
+
+<ParamField path="handler" type="EventHandler" required>
+  The exact handler function reference that was passed to `subscribe()`. Reference equality is used for matching, so arrow functions stored in variables must be the same reference.
+</ParamField>
+
+```typescript
+async function handleUserCreated(event: Event<UserCreated>) {
+  await sendWelcomeEmail(event.payload.email);
+}
+
+agent.subscribe('user.created', handleUserCreated);
+
+// Remove the subscription by passing the same function reference:
+agent.unsubscribe('user.created', handleUserCreated);
+```
+
+---
+
+### `state` property
+
+A read-only snapshot of the agent's current lifecycle state.
+
+```typescript
+readonly state: AgentState
+```
+
+<ResponseField name="state" type="AgentState">
+  One of `'created'` | `'starting'` | `'running'` | `'stopped'`. See the [AgentState](#agentstate) type definition for details on each value.
+</ResponseField>
+
+```typescript
+console.log(agent.state); // 'created' before start(), 'running' after
+```
+
+---
+
+### `name` property
+
+The human-readable name provided at construction time. Immutable after the agent is created.
+
+```typescript
+readonly name: string
+```
+
+```typescript
+const agent = new Agent({ name: 'payment-service' });
+console.log(agent.name); // 'payment-service'
+```
+
+---
+
+### `bus` property
+
+A direct reference to the underlying `EventBus` instance owned by this agent. Use this when you need to publish or subscribe at the bus level — for example, to bypass agent-level concurrency enforcement or to share a bus reference with another subsystem.
+
+```typescript
+readonly bus: EventBus
+```
+
+```typescript
+const { bus } = agent;
+
+bus.subscribe('debug.ping', (event) => {
+  console.log('Ping received at bus level:', event.metadata?.timestamp);
+});
+```
+
+<Note>
+  Interactions via `agent.bus` bypass the agent's concurrency, timeout, and retry logic. For production event handlers, prefer `agent.subscribe()`.
+</Note>
+
+---
+
+## `EventBus` Class
+
+`EventBus` is a lightweight, in-process pub/sub message broker. It maintains a registry of `eventType → handler[]` mappings and dispatches published events to all registered handlers. You rarely need to instantiate `EventBus` directly — every `Agent` creates and manages one internally, accessible via `agent.bus`.
+
+### `publish()`
+
+Publishes a fully formed `Event<T>` to all subscribers registered for `event.type`. Unlike `agent.publish()`, this method accepts an `Event` (which already carries metadata) rather than a `PublishInput`.
+
+```typescript
+async publish<T = unknown>(event: Event<T>): Promise<void>
+```
+
+<ParamField path="event" type="Event<T>" required>
+  A complete `Event` object including `type`, `payload`, and optional `metadata`.
+</ParamField>
+
+```typescript
+await agent.bus.publish({
+  type: 'system.heartbeat',
+  payload: { uptime: process.uptime() },
+  metadata: {
+    id: crypto.randomUUID(),
+    timestamp: Date.now(),
+    source: agent.name,
+  },
+});
+```
+
+---
+
+### `subscribe()`
+
+Registers a handler for a specific event type at the bus level. Identical signature to `agent.subscribe()` but without agent-level policy enforcement.
+
+```typescript
+subscribe<T = unknown>(eventType: string, handler: EventHandler<T>): Unsubscribe
+```
+
+<ParamField path="eventType" type="string" required>
+  The event type string to listen for.
+</ParamField>
+
+<ParamField path="handler" type="EventHandler<T>" required>
+  The callback to invoke for each matching event.
+</ParamField>
+
+<ResponseField name="returns" type="Unsubscribe">
+  A function that removes this handler when called.
+</ResponseField>
+
+---
+
+### `unsubscribe()`
+
+Removes a specific handler from the bus for the given event type.
+
+```typescript
+unsubscribe(eventType: string, handler: EventHandler): void
+```
+
+<ParamField path="eventType" type="string" required>
+  The event type the handler was registered for.
+</ParamField>
+
+<ParamField path="handler" type="EventHandler" required>
+  The exact handler function reference to remove.
+</ParamField>
+
+---
+
+### `clear()`
+
+Removes **all** subscriptions from the bus, across every event type. Typically used in test teardown to reset the bus to a clean state between test cases.
+
+```typescript
+clear(): void
+```
+
+```typescript
+afterEach(() => {
+  agent.bus.clear();
+});
+```
+
+<Warning>
+  `clear()` removes all registered handlers immediately and permanently. Any events published after `clear()` will be silently discarded unless new handlers are registered. Do not call this in production code.
+</Warning>
+
+---
+
+## Type Definitions
+
+### `AgentState`
+
+Represents the four possible lifecycle states of an `Agent`.
+
+```typescript
+type AgentState = 'created' | 'starting' | 'running' | 'stopped';
+```
+
+<ResponseField name="'created'" type="string">
+  The initial state after construction. The agent has not yet been started and will not process events.
+</ResponseField>
+
+<ResponseField name="'starting'" type="string">
+  Transitional state entered when `start()` is called. The `onStart` hook is running. The agent is not yet processing events.
+</ResponseField>
+
+<ResponseField name="'running'" type="string">
+  The agent is fully started. Event publications are accepted and dispatched to registered handlers.
+</ResponseField>
+
+<ResponseField name="'stopped'" type="string">
+  The agent has been shut down via `stop()`. All in-flight events were drained and `onStop` has completed. The agent can be restarted by calling `start()` again.
+</ResponseField>
+
+---
+
+### `AgentOptions`
+
+Configuration interface passed to the `Agent` constructor. See the [Constructor](#constructor) section for detailed field documentation.
+
+```typescript
+interface AgentOptions {
+  name: string;
+  concurrency?: number;
+  timeout?: number;
+  retries?: number;
+  onStart?: () => Promise<void> | void;
+  onStop?: () => Promise<void> | void;
+  onError?: (error: Error, event: Event) => void;
+}
+```
+
+---
+
+### `Event<T>`
+
+The canonical event envelope used internally by the bus and passed to every handler.
+
+```typescript
+interface Event<T = unknown> {
+  type: string;
+  payload: T;
+  metadata?: EventMetadata;
+}
+```
+
+<ResponseField name="type" type="string">
+  Namespaced string identifier for the event. Follows the `domain.action` convention (e.g. `'user.created'`).
+</ResponseField>
+
+<ResponseField name="payload" type="T">
+  The event data. Strongly typed when the generic parameter `T` is provided.
+</ResponseField>
+
+<ResponseField name="metadata" type="EventMetadata">
+  Optional envelope fields for tracing, deduplication, and correlation. Auto-populated by the agent when absent.
+</ResponseField>
+
+---
+
+### `EventMetadata`
+
+Envelope fields that travel alongside every event.
+
+```typescript
+interface EventMetadata {
+  id?: string;
+  timestamp?: number;
+  source?: string;
+  correlationId?: string;
+}
+```
+
+<ResponseField name="id" type="string">
+  A unique identifier for this specific event instance. Auto-generated as a UUID if omitted.
+</ResponseField>
+
+<ResponseField name="timestamp" type="number">
+  Unix epoch milliseconds at the time of publication. Set to `Date.now()` automatically if omitted.
+</ResponseField>
+
+<ResponseField name="source" type="string">
+  The `name` of the publishing agent. Automatically populated from `agent.name` when using `agent.publish()`.
+</ResponseField>
+
+<ResponseField name="correlationId" type="string">
+  An optional identifier for linking a chain of related events across multiple agents or services, useful for distributed tracing.
+</ResponseField>
+
+---
+
+### `PublishInput<T>`
+
+A subset of `Event<T>` accepted by `agent.publish()`. Identical shape to `Event<T>` but semantically signals that `metadata` fields will be auto-populated by the agent if absent.
+
+```typescript
+interface PublishInput<T = unknown> {
+  type: string;
+  payload: T;
+  metadata?: EventMetadata;
+}
+```
+
+---
+
+### `EventHandler<T>`
+
+The function signature expected by `subscribe()`.
+
+```typescript
+type EventHandler<T = unknown> = (event: Event<T>) => Promise<void> | void;
+```
+
+Handlers may be synchronous or return a `Promise`. When async, the agent awaits completion before releasing the concurrency slot and before applying retry logic on failure.
+
+---
+
+### `Unsubscribe`
+
+A zero-argument callback returned by `subscribe()` that removes the associated handler when invoked.
+
+```typescript
+type Unsubscribe = () => void;
+```
+
+```typescript
+const off = agent.subscribe('order.placed', handler);
+// ... later:
+off(); // handler is removed
+```

@@ -1,0 +1,158 @@
+---
+title: "Configuration Schema Reference for EDA Agent"
+sidebarTitle: "Config Schema"
+description: "Full configuration schema for EDA Agent — all AgentOptions fields, their types, defaults, constraints, and validation rules."
+---
+
+Every EDA Agent instance is configured through a single `AgentOptions` object passed directly to the `Agent` constructor. There is no external configuration file or environment-variable layer — all settings live in code, making them easy to type-check, test, and version-control alongside your application. Configuration is validated at construction time: if a required field is missing or a value falls outside its allowed range, the constructor throws synchronously before any event processing begins. The sections below describe every available option, its type and default, and the constraints that govern its valid values.
+
+---
+
+## AgentOptions Schema
+
+<ParamField path="name" type="string" required>
+  A human-readable identifier for the agent. Appears in log output, error messages, and is automatically stamped onto `metadata.source` for every event published by this agent. Using a descriptive, service-scoped name (e.g. `'payment-service'`, `'user-onboarding-agent'`) makes distributed traces and error logs significantly easier to interpret.
+
+  **Default:** none — this field is required.
+
+  **Constraints:** Must be a non-empty string. Whitespace-only values are not accepted.
+</ParamField>
+
+<ParamField path="concurrency" type="number" default="10">
+  Controls how many event handler invocations may execute in parallel within this agent at any given moment. When the limit is reached, newly dispatched events are held in an internal queue until a concurrency slot becomes available. Lowering this value protects downstream resources (databases, external APIs) from being overwhelmed; raising it allows the agent to sustain higher throughput on I/O-bound workloads.
+
+  **Default:** `10`
+
+  **Constraints:** Must be an integer greater than or equal to `1`. Setting `concurrency: 1` makes the agent process one event at a time in strict serial order.
+</ParamField>
+
+<ParamField path="timeout" type="number" default="30000">
+  The maximum number of milliseconds the agent will wait for a single handler invocation to complete. If a handler has not resolved or rejected within this window it is considered timed out, the invocation is cancelled, and the error is forwarded to `onError` (after any configured retries are exhausted). This safeguards the agent against handlers that stall indefinitely due to unresponsive network calls or deadlocks.
+
+  **Default:** `30000` (30 seconds)
+
+  **Constraints:** Must be a non-negative integer. Set to `0` to disable the timeout entirely — only do this for handlers whose completion time is externally bounded.
+</ParamField>
+
+<ParamField path="retries" type="number" default="0">
+  The number of times the agent will re-invoke a handler that throws an error or times out before giving up and calling `onError`. Retry attempts are spaced using exponential backoff, which reduces thundering-herd pressure on downstream services during transient failure periods. The total number of invocations for a single event is `1 + retries`.
+
+  **Default:** `0` (no retries — failures surface immediately to `onError`)
+
+  **Constraints:** Must be a non-negative integer.
+</ParamField>
+
+<ParamField path="onStart" type="() => Promise<void> | void">
+  An optional lifecycle hook called once after the internal `EventBus` is ready and before the agent begins consuming events. This is the right place to open database connections, establish message-broker sessions, load secrets from a vault, or perform any other async initialisation that must complete before events can be processed safely.
+
+  **Default:** `undefined`
+
+  The hook may return a `Promise`; the agent awaits its resolution before transitioning to `'running'`. If `onStart` rejects, the startup sequence is aborted and `start()` rejects with the same error.
+</ParamField>
+
+<ParamField path="onStop" type="() => Promise<void> | void">
+  An optional lifecycle hook called once during graceful shutdown, after all in-flight event handler invocations have drained. Use it to close database connections, flush write buffers, deregister from service-discovery systems, or perform any other cleanup that should happen after the last event has been processed.
+
+  **Default:** `undefined`
+
+  The hook may return a `Promise`; the agent awaits its resolution before transitioning to `'stopped'`. If `onStop` rejects, `stop()` rejects with the same error.
+</ParamField>
+
+<ParamField path="onError" type="(error: Error, event: Event) => void">
+  A global fallback error handler invoked whenever a handler throws an unrecoverable error — i.e., after all retry attempts have been exhausted. Receives the `Error` object and the `Event` that triggered the failed handler. If omitted, unhandled handler errors are silently discarded, which makes this option strongly recommended in production deployments.
+
+  **Default:** `undefined`
+
+  This callback is synchronous — it should not return a `Promise`. Use it to emit metrics, write to an error-tracking service (e.g. Sentry), or publish a compensating event to a dead-letter queue.
+</ParamField>
+
+---
+
+## Validation Rules
+
+The following constraints are enforced at construction time. Violations cause the `Agent` constructor to throw a descriptive `Error` synchronously.
+
+<Warning>
+  Configuration errors are thrown **synchronously** during construction — before any async work begins. Always wrap `new Agent(...)` in a try/catch (or let it propagate at module load time) so misconfiguration is caught early and loudly.
+</Warning>
+
+| Field | Rule |
+|---|---|
+| `name` | Must be a non-empty string. Empty strings and whitespace-only values are rejected. |
+| `concurrency` | Must be an integer ≥ 1. Fractional values and zero are rejected. |
+| `timeout` | Must be an integer ≥ 0. Negative values are rejected. |
+| `retries` | Must be an integer ≥ 0. Negative values and fractional values are rejected. |
+| `onStart` | If provided, must be a function. |
+| `onStop` | If provided, must be a function. |
+| `onError` | If provided, must be a function. |
+
+<Note>
+  Optional numeric fields that are omitted entirely fall back to their defaults. Fields set to `undefined` explicitly are treated the same as omitted.
+</Note>
+
+---
+
+## Example: Full Configuration
+
+The snippet below shows a complete `AgentOptions` object with every field populated. Inline comments explain the rationale for each choice.
+
+```typescript
+import { Agent } from 'eda-agent';
+import { db } from './db';
+import { logger } from './logger';
+import { metrics } from './metrics';
+
+const agent = new Agent({
+  // Identifies this agent in logs, traces, and event metadata.
+  name: 'order-processing-agent',
+
+  // Allow up to 8 handlers to run simultaneously.
+  // Keeps DB connection pool pressure manageable.
+  concurrency: 8,
+
+  // Cancel any handler still running after 20 seconds.
+  // Prevents stalled network calls from blocking concurrency slots.
+  timeout: 20_000,
+
+  // Retry a failing handler up to 3 times before giving up.
+  // Backoff: ~1s, ~2s, ~4s between attempts.
+  retries: 3,
+
+  // Open the database connection pool before events start flowing.
+  onStart: async () => {
+    await db.connect();
+    logger.info('Database connected — agent is ready.');
+  },
+
+  // Close the connection pool only after the last in-flight event is done.
+  onStop: async () => {
+    await db.disconnect();
+    logger.info('Database disconnected — agent shut down cleanly.');
+  },
+
+  // Ship unrecoverable handler errors to an error-tracking service
+  // and increment a dead-letter counter in your metrics backend.
+  onError: (error, event) => {
+    logger.error({ err: error, eventType: event.type }, 'Handler failed after retries');
+    metrics.increment('agent.handler.dead_letter', { eventType: event.type });
+  },
+});
+```
+
+<Tip>
+  For multi-agent applications, define a shared `baseOptions` object containing your `onError` handler and default concurrency settings, then spread it into each `Agent` constructor. This ensures consistent error reporting across all agents without duplicating boilerplate.
+
+  ```typescript
+  const baseOptions = {
+    concurrency: 10,
+    timeout: 30_000,
+    retries: 2,
+    onError: (error: Error, event: Event) => {
+      metrics.increment('agent.error', { eventType: event.type });
+    },
+  };
+
+  const orderAgent = new Agent({ ...baseOptions, name: 'order-agent' });
+  const paymentAgent = new Agent({ ...baseOptions, name: 'payment-agent', concurrency: 4 });
+  ```
+</Tip>
