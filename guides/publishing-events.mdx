@@ -1,23 +1,23 @@
 ---
-title: "Publishing Events to the EDA Agent Bus"
+title: "Publishing Events with EDA Agent: A Complete Guide"
 sidebarTitle: "Publishing Events"
-description: "Learn how to publish events in EDA Agent — defining event contracts, attaching metadata, publishing from handlers, and batching strategies."
+description: "Learn how to publish events in EDA Agent — defining event contracts, attaching metadata, publishing from handlers, and typing payloads with generics."
 ---
 
 Publishing is the act of placing a new event onto the agent's internal bus so that every registered handler for that event type can react to it. In an event-driven system, publishing decouples the code that detects something happened from the code that responds to it — the publisher does not know, and does not need to know, which handlers are listening. This separation is what makes event-driven architectures easy to extend: adding a new reaction to an existing event is as simple as calling `agent.subscribe()` in a new module, with no changes to the publishing code.
 
-## The Event Object
+## The PublishInput Object
 
-Every call to `agent.publish()` accepts a single object that conforms to the `Event` interface. Understanding each field helps you design expressive, traceable event contracts.
+Every call to `agent.publish()` accepts a single object that conforms to the `PublishInput<T>` interface. Understanding each field helps you design expressive, traceable event contracts.
 
 ```typescript
-interface Event<T = unknown> {
+interface PublishInput<T = unknown> {
   type: string;      // Namespaced event type, e.g. 'order.placed'
   payload: T;        // Event-specific data — the facts about what happened
   metadata?: {
-    id?: string;           // Unique event ID (auto-generated if omitted)
-    timestamp?: number;    // Unix ms timestamp (auto-set if omitted)
-    source?: string;       // Name of the publishing agent
+    id?: string;            // Unique event ID
+    timestamp?: number;     // Unix ms timestamp
+    source?: string;        // Name of the publishing agent or service
     correlationId?: string; // For tracing a chain of related events
   };
 }
@@ -27,7 +27,7 @@ The `type` field is the primary routing key — the agent uses it to dispatch th
 
 ## Publishing an Event
 
-Call `agent.publish()` with an event object. The method is asynchronous and resolves once the event has been accepted by the internal bus and dispatched to the relevant handlers (subject to the configured `concurrency` limit).
+Call `agent.publish()` with a `PublishInput` object. The method is asynchronous and resolves once the event has been accepted by the internal bus and dispatched to the relevant handlers (subject to the configured `concurrency` limit).
 
 ```typescript
 // Minimal publish — only type and payload are required

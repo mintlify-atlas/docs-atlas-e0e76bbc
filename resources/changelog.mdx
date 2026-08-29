@@ -1,7 +1,7 @@
 ---
-title: "EDA Agent Changelog"
+title: "EDA Agent Release History and Changelog — All Versions"
 sidebarTitle: "Changelog"
-description: "Release history for EDA Agent — new features, improvements, bug fixes, and breaking changes across all published versions."
+description: "Full release history for EDA Agent — new features, bug fixes, breaking changes, and migration guidance across all published versions."
 ---
 
 This changelog documents every published version of EDA Agent. The project follows [Semantic Versioning](https://semver.org/) — version numbers communicate the nature of each release so that consumers can upgrade with confidence. All entries include the release date, a summary of changes, and — where applicable — migration guidance for breaking changes.
@@ -39,15 +39,17 @@ This release establishes the foundational API for building software agents on to
 - **`Agent` class** — The central abstraction for defining and running an agent. Exposes the full lifecycle API:
   - `start()` — Initialises the agent, attaches the event bus, and invokes the `onStart` callback.
   - `stop()` — Drains in-flight events, detaches subscribers, and invokes the `onStop` callback.
-  - `publish(type, payload)` — Validates agent state, enriches the event envelope, and delivers the event to the bus.
-  - `subscribe(type, handler)` — Registers a handler function for a named event type.
+  - `publish(event)` — Accepts a `PublishInput` object (`{ type, payload, metadata? }`), validates agent state, enriches the event envelope, and delivers the event to the bus.
+  - `subscribe(type, handler)` — Registers a handler function for a named event type. Returns an `Unsubscribe` function.
   - `unsubscribe(type, handler)` — Removes a previously registered handler.
 
-- **In-memory `EventBus`** — A lightweight, dependency-free event bus with fan-out delivery. Events published to the bus are forwarded to every subscriber registered for that event type. The bus is intentionally in-memory: it has no external dependencies and adds zero infrastructure overhead for local development and testing.
+- **In-memory `EventBus`** — A lightweight, dependency-free event bus with fan-out delivery. Events published to the bus are forwarded to every subscriber registered for that event type. The bus is intentionally in-memory: it has no external dependencies and adds zero infrastructure overhead for local development and testing. Exposes `publish()`, `subscribe()`, `unsubscribe()`, and `clear()` methods.
 
 - **TypeScript generics for typed event payloads** — All publish and subscribe APIs accept a generic type parameter so that event payload shapes are enforced at compile time:
 
   ```typescript
+  import { Agent } from 'eda-agent';
+
   interface UserSignedUp {
     userId: string;
     email: string;
@@ -61,17 +63,19 @@ This release establishes the foundational API for building software agents on to
 
 - **`AgentOptions`** — A configuration object accepted by the `Agent` constructor. Supported options in this release:
 
-  | Option | Type | Description |
-  |---|---|---|
-  | `name` | `string` | Human-readable identifier for the agent, used as the `source` field in event metadata. |
-  | `concurrency` | `number` | Maximum number of handler invocations that may run in parallel. Defaults to unbounded. |
-  | `timeout` | `number` | Maximum time (ms) a handler may run before it is considered failed. |
-  | `retries` | `number` | Number of times a failing handler is retried before `onError` is called. |
-  | `onStart` | `() => void \| Promise<void>` | Lifecycle hook invoked when the agent starts. |
-  | `onStop` | `() => void \| Promise<void>` | Lifecycle hook invoked when the agent stops. |
-  | `onError` | `(err: Error, event: Event) => void` | Global error handler for unrecoverable handler failures. |
+  | Option | Type | Default | Description |
+  |---|---|---|---|
+  | `name` | `string` | *(required)* | Human-readable identifier for the agent, used as the `source` field in event metadata. |
+  | `concurrency` | `number` | `10` | Maximum number of handler invocations that may run in parallel. |
+  | `timeout` | `number` | `30000` | Maximum time (ms) a handler may run before it is considered failed. |
+  | `retries` | `number` | `0` | Number of times a failing handler is retried before `onError` is called. |
+  | `onStart` | `() => void \| Promise<void>` | — | Lifecycle hook invoked when the agent starts. |
+  | `onStop` | `() => void \| Promise<void>` | — | Lifecycle hook invoked when the agent stops. |
+  | `onError` | `(err: Error, event: Event) => void` | — | Global error handler for unrecoverable handler failures. |
 
   ```typescript
+  import { Agent } from 'eda-agent';
+
   const agent = new Agent({
     name: "payment-agent",
     concurrency: 10,
@@ -83,17 +87,30 @@ This release establishes the foundational API for building software agents on to
   });
   ```
 
-- **`EventMetadata` envelope** — Every event delivered to a handler is wrapped in a metadata envelope that is auto-populated by `agent.publish()`:
+- **`EventMetadata` envelope** — Every event delivered to a handler is wrapped in an `Event` object. The `metadata` field is auto-populated by `agent.publish()`:
 
   | Field | Type | Description |
   |---|---|---|
-  | `id` | `string` | Auto-generated unique identifier (UUID v4) for this event instance. |
+  | `id` | `string` | Auto-generated unique identifier for this event instance. |
   | `timestamp` | `number` | Unix timestamp (ms) at the moment the event was published. |
   | `source` | `string` | The `name` of the agent that published the event. |
-  | `type` | `string` | The event type string passed to `publish()`. |
-  | `payload` | `T` | The strongly-typed payload object. |
+  | `correlationId` | `string` | Optional identifier for correlating related events across the system. |
+
+  The full `Event<T>` shape delivered to each handler is:
+
+  ```typescript
+  interface Event<T = unknown> {
+    type: string;       // The event type string
+    payload: T;         // The strongly-typed payload object
+    metadata?: {
+      id?: string;
+      timestamp?: number;
+      source?: string;
+      correlationId?: string;
+    };
+  }
+  ```
 
 - **MIT License** — EDA Agent is released under the [MIT License](https://github.com/hodophile/eda-agent/blob/main/LICENSE) by Waseem. The framework is free to use, modify, and distribute in both open-source and commercial projects.
 
 </Update>
-

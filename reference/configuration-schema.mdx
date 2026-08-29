@@ -1,10 +1,10 @@
 ---
-title: "Configuration Schema Reference for EDA Agent"
+title: "EDA Agent Configuration Schema: AgentOptions Reference"
 sidebarTitle: "Config Schema"
-description: "Full configuration schema for EDA Agent — all AgentOptions fields, their types, defaults, constraints, and validation rules."
+description: "Complete AgentOptions schema for EDA Agent — all fields, types, defaults, and usage guidance for configuring concurrency, timeouts, and retries."
 ---
 
-Every EDA Agent instance is configured through a single `AgentOptions` object passed directly to the `Agent` constructor. There is no external configuration file or environment-variable layer — all settings live in code, making them easy to type-check, test, and version-control alongside your application. Configuration is validated at construction time: if a required field is missing or a value falls outside its allowed range, the constructor throws synchronously before any event processing begins. The sections below describe every available option, its type and default, and the constraints that govern its valid values.
+Every EDA Agent instance is configured through a single `AgentOptions` object passed directly to the `Agent` constructor. There is no external configuration file or environment-variable layer — all settings live in code, making them easy to type-check, test, and version-control alongside your application. The sections below describe every available option, its type, its default value, and guidance on choosing appropriate values for your workload.
 
 ---
 
@@ -35,11 +35,9 @@ Every EDA Agent instance is configured through a single `AgentOptions` object pa
 </ParamField>
 
 <ParamField path="retries" type="number" default="0">
-  The number of times the agent will re-invoke a handler that throws an error or times out before giving up and calling `onError`. Retry attempts are spaced using exponential backoff, which reduces thundering-herd pressure on downstream services during transient failure periods. The total number of invocations for a single event is `1 + retries`.
+  The number of times the agent will re-invoke a handler that throws an error before giving up and calling `onError`.
 
   **Default:** `0` (no retries — failures surface immediately to `onError`)
-
-  **Constraints:** Must be a non-negative integer.
 </ParamField>
 
 <ParamField path="onStart" type="() => Promise<void> | void">
@@ -65,30 +63,6 @@ Every EDA Agent instance is configured through a single `AgentOptions` object pa
 
   This callback is synchronous — it should not return a `Promise`. Use it to emit metrics, write to an error-tracking service (e.g. Sentry), or publish a compensating event to a dead-letter queue.
 </ParamField>
-
----
-
-## Validation Rules
-
-The following constraints are enforced at construction time. Violations cause the `Agent` constructor to throw a descriptive `Error` synchronously.
-
-<Warning>
-  Configuration errors are thrown **synchronously** during construction — before any async work begins. Always wrap `new Agent(...)` in a try/catch (or let it propagate at module load time) so misconfiguration is caught early and loudly.
-</Warning>
-
-| Field | Rule |
-|---|---|
-| `name` | Must be a non-empty string. Empty strings and whitespace-only values are rejected. |
-| `concurrency` | Must be an integer ≥ 1. Fractional values and zero are rejected. |
-| `timeout` | Must be an integer ≥ 0. Negative values are rejected. |
-| `retries` | Must be an integer ≥ 0. Negative values and fractional values are rejected. |
-| `onStart` | If provided, must be a function. |
-| `onStop` | If provided, must be a function. |
-| `onError` | If provided, must be a function. |
-
-<Note>
-  Optional numeric fields that are omitted entirely fall back to their defaults. Fields set to `undefined` explicitly are treated the same as omitted.
-</Note>
 
 ---
 

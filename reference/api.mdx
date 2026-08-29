@@ -1,7 +1,7 @@
 ---
-title: "EDA Agent API Reference"
+title: "EDA Agent API Reference — Agent, EventBus, and Types"
 sidebarTitle: "API Reference"
-description: "Complete API reference for EDA Agent's Agent and EventBus classes — constructor options, methods, types, and return values."
+description: "Complete API reference for EDA Agent covering the Agent and EventBus classes, all constructor options, methods, type signatures, and return values."
 ---
 
 EDA Agent exposes two primary classes — `Agent` and `EventBus` — along with a set of TypeScript interfaces and utility types that together form the complete public API surface. `Agent` is the high-level abstraction you work with day-to-day: it owns a lifecycle (`start` / `stop`), manages concurrency and retries, and delegates message routing to its internal `EventBus`. `EventBus` is the low-level pub/sub backbone that you can also access directly through `agent.bus` when you need fine-grained control over subscription management. This reference documents every constructor option, method signature, parameter, and return type for both classes.
@@ -47,7 +47,7 @@ const agent = new Agent({
 </ParamField>
 
 <ParamField path="retries" type="number" default="0">
-  Number of times a failing handler will be retried before the error is forwarded to `onError`. Retries are spaced with exponential backoff. Set to `0` to disable retries. Must be a non-negative integer.
+  Number of times a failing handler will be retried before the error is forwarded to `onError`. Set to `0` to disable retries. Must be a non-negative integer.
 </ParamField>
 
 <ParamField path="onStart" type="() => Promise<void> | void">
@@ -78,7 +78,7 @@ console.log(agent.state); // 'running'
 ```
 
 <ResponseField name="returns" type="Promise<void>">
-  Resolves once the agent is fully started and `onStart` has completed. Rejects if `onStart` throws, leaving the agent in a faulted state.
+  Resolves once the agent is fully started and `onStart` has completed. Rejects if `onStart` throws.
 </ResponseField>
 
 <Note>

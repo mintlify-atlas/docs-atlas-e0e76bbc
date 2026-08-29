@@ -1,7 +1,7 @@
 ---
-title: "Get Started with EDA Agent in Minutes"
+title: "Quickstart: Run Your First EDA Agent in Five Minutes"
 sidebarTitle: "Quickstart"
-description: "Learn how to install EDA Agent, define your first event, register a handler, and run a working agent in under five minutes."
+description: "Install EDA Agent, define a typed event contract, wire up a handler, and run your first working event-driven agent — all in under five minutes."
 ---
 
 In this guide you will build a minimal but fully functional event-driven agent that listens for a `user.created` event and logs a personalised welcome message. By the end you will have installed EDA Agent, written a typed event contract, wired up a handler, and seen the agent respond to a published event — all in fewer than thirty lines of code.
@@ -140,7 +140,7 @@ In this guide you will build a minimal but fully functional event-driven agent t
 Here is the full working example in a single TypeScript file, combining every step above.
 
 ```typescript agent.ts
-import { Agent, EventBus } from 'eda-agent';
+import { Agent } from 'eda-agent';
 
 // --- Event type definitions ---
 interface UserCreatedPayload {

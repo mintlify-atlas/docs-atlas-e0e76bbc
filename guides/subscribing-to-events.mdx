@@ -1,7 +1,7 @@
 ---
-title: "Subscribing to Events in EDA Agent"
+title: "Subscribing to Events in EDA Agent: Handlers Guide"
 sidebarTitle: "Subscribing to Events"
-description: "A guide to subscribing handlers to event types in EDA Agent — registration patterns, wildcard subscriptions, and unsubscribing cleanly."
+description: "A guide to registering event handlers in EDA Agent — subscription patterns, managing multiple handlers per event type, and unsubscribing cleanly."
 ---
 
 Subscriptions are the consumer side of the event bus. When you subscribe a handler to an event type, you are telling the agent: "every time an event with this type arrives, invoke this function." Handlers are plain async (or sync) functions — they receive the full `Event` object and can perform any work: calling APIs, writing to a database, publishing further events, or updating shared state. The subscription system is the mechanism that turns a raw stream of events into meaningful, coordinated behaviour.
@@ -35,7 +35,7 @@ await agent.start();
 You can register **multiple handlers for the same event type**. EDA Agent invokes all matching handlers concurrently (subject to the `concurrency` limit) whenever a matching event is published.
 
 ```typescript
-// Both handlers run when 'order.placed' is published
+// All three handlers run when 'order.placed' is published
 agent.subscribe('order.placed', handleInventoryReservation);
 agent.subscribe('order.placed', handlePaymentCapture);
 agent.subscribe('order.placed', handleAnalyticsTracking);
@@ -45,9 +45,9 @@ agent.subscribe('order.placed', handleAnalyticsTracking);
   Handlers are matched by exact string equality. `'order.placed'` and `'Order.Placed'` are treated as different event types. Adopt a consistent lowercase naming convention (see the [Publishing Events](/guides/publishing-events) guide) to avoid silent mismatches.
 </Note>
 
-## Wildcard Subscriptions
+## Handling Multiple Related Event Types
 
-EDA Agent matches event types by exact string. There is no built-in wildcard or glob syntax. If you need a single handler to react to several related event types, the cleanest approach is to iterate over the list of types and register the handler for each one:
+EDA Agent matches event types by exact string — there is no built-in wildcard or glob syntax. If you need a single handler to react to several related event types, the cleanest approach is to iterate over the list of types and register the handler for each one:
 
 ```typescript
 const orderHandler = async (event: Event) => {
@@ -79,7 +79,7 @@ ALL_EVENT_TYPES.forEach((type) => {
 
 ## The Unsubscribe Handle
 
-`agent.subscribe()` returns an **unsubscribe function**. Calling that function removes the handler from the event bus immediately — subsequent events of that type will no longer invoke it. This is the preferred way to clean up subscriptions.
+`agent.subscribe()` returns an **unsubscribe function** of type `() => void`. Calling that function removes the handler from the event bus immediately — subsequent events of that type will no longer invoke it. This is the preferred way to clean up subscriptions.
 
 ```typescript
 // Capture the returned unsubscribe function
@@ -111,10 +111,10 @@ agent.unsubscribe('order.placed', handleOrderPlaced);
 A common pattern is to clean up all subscriptions when an agent stops, using the `onStop` lifecycle hook:
 
 ```typescript
-const unsubscribers: Array<() => void> = [];
+const handleOrderPlaced    = async (event: Event) => { /* ... */ };
+const handleOrderCancelled = async (event: Event) => { /* ... */ };
 
-unsubscribers.push(agent.subscribe('order.placed',    handleOrderPlaced));
-unsubscribers.push(agent.subscribe('order.cancelled', handleOrderCancelled));
+const unsubscribers: Array<() => void> = [];
 
 const agent = new Agent({
   name: 'order-agent',
@@ -123,6 +123,11 @@ const agent = new Agent({
     console.log('All subscriptions removed');
   },
 });
+
+unsubscribers.push(agent.subscribe('order.placed',    handleOrderPlaced));
+unsubscribers.push(agent.subscribe('order.cancelled', handleOrderCancelled));
+
+await agent.start();
 ```
 
 ## Subscription Lifecycle

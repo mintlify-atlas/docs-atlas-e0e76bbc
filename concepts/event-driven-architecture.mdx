@@ -1,7 +1,7 @@
 ---
-title: "Event-Driven Architecture: How EDA Agent Works"
+title: "EDA Agent: Understanding Event-Driven Architecture"
 sidebarTitle: "EDA Overview"
-description: "Understand the event-driven architecture pattern that powers EDA Agent — events, producers, consumers, and why async decoupling makes agents more resilient."
+description: "Understand the event-driven pattern behind EDA Agent — events, producers, consumers, and why async decoupling makes your agents resilient and scalable."
 ---
 
 Event-driven architecture (EDA) is a design paradigm in which components communicate by producing and reacting to discrete, immutable records called _events_ rather than invoking each other directly. EDA Agent is built on this pattern from the ground up, allowing you to compose sophisticated agent behaviours from small, independent pieces that each respond to exactly the events they care about — without any tight coupling between them.
@@ -20,8 +20,15 @@ interface Event<T = unknown> {
   /** The domain-specific data associated with this event */
   payload: T;
 
-  /** Optional cross-cutting metadata (timestamps, trace IDs, etc.) */
-  metadata?: Record<string, unknown>;
+  /** Optional cross-cutting metadata (timestamps, correlation IDs, etc.) */
+  metadata?: EventMetadata;
+}
+
+interface EventMetadata {
+  id?: string;
+  timestamp?: number;
+  source?: string;
+  correlationId?: string;
 }
 ```
 
@@ -45,8 +52,7 @@ EDA Agent uses the **publish/subscribe** (pub/sub) model. A _producer_ publishes
     ▼
   EventBus
     ├──▶ Handler A  (subscribed to "user.created")
-    ├──▶ Handler B  (subscribed to "user.created")
-    └──▶ Handler C  (subscribed to "*.created")   ← wildcard (future)
+    └──▶ Handler B  (subscribed to "user.created")
   ```
 
   All matching handlers receive the same event object concurrently. The producer
@@ -109,7 +115,7 @@ Understanding the exact sequence from publication to handler completion helps yo
 
 4. **Execution** — Each handler performs its logic — writing to a database, calling an external API, publishing further events, etc. Handlers that return a `Promise` are awaited internally so that async errors can be caught.
 
-5. **Error containment** — If a handler rejects or throws, the bus catches the error, emits a built-in `agent.error` event with the original event and the error as payload, and continues processing remaining handlers. The publisher is never interrupted.
+5. **Error containment** — If a handler rejects or throws, the bus catches the error, passes it to the `onError` callback (if configured in `AgentOptions`), and continues processing the remaining handlers. The publisher is never interrupted.
 
 6. **Completion** — Once all handlers for the original event have either resolved or been caught, the publication cycle for that event is complete.
 

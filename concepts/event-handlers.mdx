@@ -1,5 +1,5 @@
 ---
-title: "Event Handlers: Processing Events in EDA Agent"
+title: "EDA Agent Event Handlers: Defining and Managing Logic"
 sidebarTitle: "Event Handlers"
 description: "Learn how event handlers work in EDA Agent — defining handler functions, typing payloads, composing handlers, and controlling execution flow."
 ---
@@ -20,7 +20,7 @@ The `Event<T>` type carries the three standard fields introduced in the [EDA Ove
 interface Event<T = unknown> {
   type: string;
   payload: T;
-  metadata?: Record<string, unknown>;
+  metadata?: EventMetadata;
 }
 ```
 
@@ -204,7 +204,7 @@ Writing handlers that are easy to maintain, test, and operate requires a small a
   </Card>
   <Card title="Handle Errors Internally" icon="triangle-exclamation">
     Wrap async operations in try/catch inside the handler. Unhandled rejections
-    are caught by the bus and re-emitted as `agent.error` events, but explicit
+    are caught by the bus and passed to the `onError` callback, but explicit
     error handling gives you more control over retry logic and observability.
   </Card>
   <Card title="Avoid Non-Idempotent Side Effects" icon="rotate-left">

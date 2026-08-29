@@ -1,5 +1,5 @@
 ---
-title: "Frequently Asked Questions about EDA Agent"
+title: "EDA Agent — Frequently Asked Questions and Answers"
 sidebarTitle: "FAQ"
 description: "Answers to common questions about EDA Agent — installation, event ordering, concurrency, error handling, and migrating from request-response patterns."
 ---
@@ -16,6 +16,8 @@ This FAQ collects the most common questions developers ask when getting started 
     Yes. EDA Agent ships with full TypeScript type declarations out of the box, and TypeScript is the recommended way to use the framework. Because event payloads flow through the system as plain objects, TypeScript generics let you define strongly-typed event contracts at the point of both publication and subscription:
 
     ```typescript
+    import { Agent } from 'eda-agent';
+
     interface OrderPlaced {
       orderId: string;
       total: number;
@@ -90,6 +92,8 @@ This FAQ collects the most common questions developers ask when getting started 
     Yes. You can instantiate as many `Agent` objects as you like within a single Node.js process. Each instance maintains its **own independent event bus** and its own subscriber registry, so events published to one agent are not visible to another:
 
     ```typescript
+    import { Agent } from 'eda-agent';
+
     const billingAgent = new Agent({ name: "billing-agent" });
     const notificationAgent = new Agent({ name: "notification-agent" });
 
@@ -97,7 +101,7 @@ This FAQ collects the most common questions developers ask when getting started 
     await notificationAgent.start();
     ```
 
-    If you want two agents to react to the same events, pass a **shared `EventBus` instance** to both when constructing them. This is an advanced pattern — use it deliberately, as it creates coupling between the agents.
+    Each agent manages its own lifecycle independently. You can start, stop, and publish events to each agent without affecting the other.
   </Accordion>
 
   <Accordion title="How do I test event handlers?">
@@ -118,12 +122,14 @@ This FAQ collects the most common questions developers ask when getting started 
     **Integration testing** — Create a real `Agent` instance with a short `timeout`, publish events programmatically, and assert on observable side effects:
 
     ```typescript
+    import { Agent } from 'eda-agent';
+
     it("processes payment on order.placed", async () => {
       const agent = new Agent({ name: "test-agent", timeout: 500 });
       agent.subscribe("order.placed", handleOrderPlaced);
       await agent.start();
 
-      await agent.publish("order.placed", { orderId: "abc", total: 49.99 });
+      await agent.publish({ type: "order.placed", payload: { orderId: "abc", total: 49.99 } });
       await new Promise((r) => setTimeout(r, 100)); // allow handler to run
 
       expect(paymentServiceMock.charge).toHaveBeenCalled();
@@ -140,9 +146,9 @@ This FAQ collects the most common questions developers ask when getting started 
     | `agent.publish()` | ✅ Yes | ✅ Yes | ✅ Yes |
     | `agent.bus.publish()` | ⚠️ Advanced only | ❌ No | ❌ No |
 
-    `agent.publish()` is the **recommended public API**. Before forwarding to the bus, it verifies that the agent has been started, then automatically enriches the event envelope with a generated `id`, the current `timestamp`, and the agent's `source` name.
+    `agent.publish()` accepts a `PublishInput` object (`{ type, payload, metadata? }`) and is the **recommended public API**. Before forwarding to the bus, it verifies that the agent has been started, then automatically enriches the event envelope with a generated `id`, the current `timestamp`, and the agent's `source` name.
 
-    `agent.bus.publish()` is a lower-level escape hatch that bypasses all agent-level checks and metadata enrichment. It exists for advanced scenarios such as bridging an external message broker into the bus, where you want to preserve original metadata from upstream systems.
+    `agent.bus.publish()` accepts a full `Event` object and is a lower-level escape hatch that bypasses all agent-level checks and metadata enrichment. It exists for advanced scenarios such as bridging an external message broker into the bus, where you want to preserve original metadata from upstream systems.
 
     <Warning>
       Calling `agent.bus.publish()` on a stopped or uninitialised agent can result in events being lost or handlers never being invoked. Prefer `agent.publish()` in application code.
@@ -157,7 +163,7 @@ This FAQ collects the most common questions developers ask when getting started 
     ```typescript
     // Bridge Redis Streams into EDA Agent
     redisStreamConsumer.on("message", async (streamMessage) => {
-      await agent.publish(streamMessage.type, streamMessage.payload);
+      await agent.publish({ type: streamMessage.type, payload: streamMessage.payload });
     });
     ```
 
@@ -168,7 +174,7 @@ This FAQ collects the most common questions developers ask when getting started 
     - **Redis Streams** — low-latency, consumer groups, built-in persistence
 
     <Info>
-      When bridging a broker, use `agent.bus.publish()` (not `agent.publish()`) if you want to preserve the original event `id` and `timestamp` from the broker rather than generating new metadata.
+      When bridging a broker, use `agent.bus.publish()` if you want to preserve the original event `id` and `timestamp` from the broker rather than generating new metadata.
     </Info>
   </Accordion>
 
@@ -176,6 +182,8 @@ This FAQ collects the most common questions developers ask when getting started 
     Register OS signal handlers that call `await agent.stop()` before the process exits. The `stop()` method drains all in-flight events and waits for active handler invocations to complete before resolving — preventing data loss or partially-processed events during deployments or restarts:
 
     ```typescript
+    import { Agent } from 'eda-agent';
+
     const agent = new Agent({ name: "production-agent" });
     await agent.start();
 

@@ -1,10 +1,10 @@
 ---
-title: "Error Handling and Resilience in EDA Agent"
+title: "Error Handling and Resilience Patterns in EDA Agent"
 sidebarTitle: "Error Handling"
-description: "Configure error handling, retries, timeouts, and dead-letter queues in EDA Agent to build fault-tolerant event-driven workflows."
+description: "Configure error handling, retries, and timeouts in EDA Agent, and implement dead-letter patterns to build fault-tolerant event-driven workflows."
 ---
 
-In asynchronous, event-driven systems, errors are not exceptions to the norm — they are an expected part of runtime behaviour. Networks time out, downstream services return 500s, databases deadlock, and payloads occasionally contain unexpected shapes. Because handlers execute independently and asynchronously, a failure in one handler has no direct call stack to propagate to, which means the application cannot rely on a simple `try/catch` at a central entry point. EDA Agent provides a layered resilience model — per-handler retries, configurable timeouts, a global error callback, and composable dead-letter patterns — so you can respond appropriately to every class of failure without defensive boilerplate scattered across every handler.
+In asynchronous, event-driven systems, errors are not exceptions to the norm — they are an expected part of runtime behaviour. Networks time out, downstream services return 500s, databases deadlock, and payloads occasionally contain unexpected shapes. Because handlers execute independently and asynchronously, a failure in one handler has no direct call stack to propagate to, which means the application cannot rely on a simple `try/catch` at a central entry point. EDA Agent provides a layered resilience model — per-handler retries, configurable timeouts, and a global error callback — so you can respond appropriately to every class of failure without defensive boilerplate scattered across every handler.
 
 ## Handler Errors
 
@@ -38,7 +38,7 @@ Errors thrown inside a handler do **not** affect other handlers registered for t
 
 ## The onError Callback
 
-The `onError` callback is your global safety net. It receives the `Error` object and the original `Event` that triggered the failing handler, giving you everything you need to log, alert, or route the failure.
+The `onError` callback is your global safety net. It receives the `Error` object and the original `Event` that triggered the failing handler, giving you everything you need to log, alert, or route the failure. Its signature is `(error: Error, event: Event) => void`.
 
 ```typescript
 const agent = new Agent({
@@ -108,23 +108,8 @@ agent.subscribe('user.registered', async (event) => {
 ```
 
 <Note>
-  EDA Agent retries immediately by default — there is no built-in exponential backoff between attempts. If your use case requires progressive backoff to avoid hammering a struggling dependency, implement it inside the handler using a `sleep` utility before re-throwing, or use a dedicated retry library such as `p-retry` inside the handler body. Each retry is a fresh invocation of the handler function, so any await-based delay placed before the first `throw` will be respected.
+  EDA Agent retries immediately — there is no built-in delay or backoff between attempts. If your use case requires progressive backoff to avoid hammering a struggling dependency, implement the delay inside the handler itself using a `sleep` utility before re-throwing. Each retry is a fresh invocation of the handler function, so any await-based delay placed before the first `throw` will be respected.
 </Note>
-
-```typescript
-import pRetry from 'p-retry';
-
-agent.subscribe('payment.capture', async (event) => {
-  await pRetry(
-    () => paymentGateway.capture(event.payload.chargeId),
-    {
-      retries: 3,
-      minTimeout: 500,
-      factor: 2,  // Exponential backoff: 500 ms, 1 s, 2 s
-    }
-  );
-});
-```
 
 ## Timeouts
 

@@ -1,7 +1,7 @@
 ---
-title: "Event Bus: The Core Message Router"
+title: "EDA Agent Event Bus: Routing, Subscriptions, and Delivery"
 sidebarTitle: "Event Bus"
-description: "Explore EDA Agent's event bus — the central broker that routes events from producers to subscribers, manages subscriptions, and ensures delivery ordering."
+description: "Explore EDA Agent's event bus — the central broker that routes events from producers to subscribers, manages subscriptions, and ensures ordered delivery."
 ---
 
 The event bus is the nervous system of every EDA Agent instance. It is the single point through which all events flow — accepting publications from producers, maintaining the registry of active subscriptions, and fanning each event out to every handler that has expressed interest in its type. Because all inter-component communication passes through the bus, the rest of your agent code remains blissfully unaware of who else is listening, making the system easy to extend and safe to refactor.
@@ -64,8 +64,8 @@ bus.publish(event: Event): Promise<void>
 
 <ParamField body="event.metadata" type="object">
   Optional envelope for cross-cutting concerns that are not part of the domain
-  payload. Common fields include `correlationId`, `causationId`, `timestamp`,
-  and `traceId`. Metadata is passed through to handlers unchanged.
+  payload. Supported fields are `id`, `timestamp`, `source`, and `correlationId`.
+  Metadata is passed through to handlers unchanged.
 </ParamField>
 
 ### `bus.subscribe(eventType, handler)`
